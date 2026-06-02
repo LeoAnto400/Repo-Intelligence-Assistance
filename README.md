@@ -42,3 +42,14 @@ src/
    ```bash
    uvicorn src.api.main:app --reload
    ```
+
+   Current Status
+
+✅ Project structure
+⬜ Repository ingestion
+⬜ Chunking
+⬜ Embeddings
+⬜ ChromaDB
+⬜ Retrieval
+⬜ Analysis Agent
+⬜ LangGraph

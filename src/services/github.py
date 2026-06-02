@@ -1,9 +1,12 @@
+import logging
 import os
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_EXTENSIONS: Dict[str, str] = {
     ".py": "Python",
@@ -54,6 +57,83 @@ class GitHubService:
         """
         self.token = token
 
+    def clone_repository(self, repo_url: str) -> str:
+        """
+        Clones a GitHub repository from a URL into a temporary workspace within the project.
+        
+        Args:
+            repo_url: Full HTTP URL to the GitHub repository.
+            
+        Returns:
+            The absolute local path to the cloned repository.
+            
+        Raises:
+            ValueError: If the repository URL is empty or invalid.
+            RuntimeError: If cloning fails.
+        """
+        if not repo_url or not repo_url.strip():
+            logger.error("Repository URL is empty or invalid.")
+            raise ValueError("Repository URL cannot be empty.")
+
+        # Ensure temp directory exists inside workspace root to adhere to constraints
+        workspace_root = os.getcwd()
+        temp_base_dir = os.path.join(workspace_root, ".temp_clones")
+        try:
+            os.makedirs(temp_base_dir, exist_ok=True)
+        except Exception as e:
+            logger.exception("Failed to create temporary base directory %s", temp_base_dir)
+            raise RuntimeError(f"Failed to initialize temporary workspace directory: {e}") from e
+
+        # Build authenticated clone URL if token is present
+        clone_url = repo_url.strip()
+        if self.token:
+            # Handle token injection for HTTP clone URLs
+            if clone_url.startswith("https://github.com/"):
+                clone_url = clone_url.replace("https://github.com/", f"https://x-access-token:{self.token}@github.com/")
+            elif clone_url.startswith("http://github.com/"):
+                clone_url = clone_url.replace("http://github.com/", f"http://x-access-token:{self.token}@github.com/")
+
+        # Create a unique temporary directory inside the temp base directory
+        try:
+            temp_dir = tempfile.mkdtemp(dir=temp_base_dir)
+            logger.info("Created temporary workspace directory for cloning: %s", temp_dir)
+        except Exception as e:
+            logger.exception("Failed to create temporary directory for clone")
+            raise RuntimeError(f"Failed to create temporary directory for clone: {e}") from e
+
+        try:
+            logger.info("Cloning repository from %s to %s", repo_url, temp_dir)
+            # Execute git clone
+            # Use --depth 1 to minimize download size and speed up ingestion
+            subprocess.run(
+                ["git", "clone", "--depth", "1", clone_url, temp_dir],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            logger.info("Successfully cloned repository to %s", temp_dir)
+            return os.path.abspath(temp_dir)
+        except subprocess.CalledProcessError as e:
+            err_msg = e.stderr.strip() if e.stderr else (e.stdout.strip() if e.stdout else str(e))
+            logger.error("Git clone failed: %s", err_msg)
+            if os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                    logger.info("Cleaned up temporary directory %s after clone failure", temp_dir)
+                except Exception as cleanup_err:
+                    logger.exception("Failed to clean up directory %s after clone failure", temp_dir)
+            raise RuntimeError(f"Failed to clone repository: {err_msg}") from e
+        except Exception as e:
+            logger.exception("An unexpected error occurred during repository clone")
+            if os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                    logger.info("Cleaned up temporary directory %s after clone failure", temp_dir)
+                except Exception as cleanup_err:
+                    logger.exception("Failed to clean up directory %s after clone failure", temp_dir)
+            raise RuntimeError(f"An unexpected error occurred during repository clone: {e}") from e
+
     def fetch_repo_files(self, repo_url: str) -> List[Dict[str, Any]]:
         """
         Clones a GitHub repository into a temporary workspace within the project,
@@ -72,40 +152,10 @@ class GitHubService:
             ValueError: If the repository URL is empty or invalid.
             RuntimeError: If cloning or reading files fails.
         """
-        if not repo_url or not repo_url.strip():
-            raise ValueError("Repository URL cannot be empty.")
-
-        # Ensure temp directory exists inside workspace root to adhere to constraints
-        workspace_root = os.getcwd()
-        temp_base_dir = os.path.join(workspace_root, ".temp_clones")
-        os.makedirs(temp_base_dir, exist_ok=True)
-
-        # Build authenticated clone URL if token is present
-        clone_url = repo_url
-        if self.token:
-            # Handle token injection for HTTP clone URLs
-            if repo_url.startswith("https://github.com/"):
-                clone_url = repo_url.replace("https://github.com/", f"https://x-access-token:{self.token}@github.com/")
-
+        temp_dir = self.clone_repository(repo_url)
         results: List[Dict[str, Any]] = []
 
-        # Create temporary directory inside workspace root
-        with tempfile.TemporaryDirectory(dir=temp_base_dir) as temp_dir:
-            try:
-                # Execute git clone
-                # Use --depth 1 to minimize download size and speed up ingestion
-                subprocess.run(
-                    ["git", "clone", "--depth", "1", clone_url, temp_dir],
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-            except subprocess.CalledProcessError as e:
-                # Clean up and re-raise clear error
-                err_msg = e.stderr or e.stdout or str(e)
-                raise RuntimeError(f"Failed to clone repository: {err_msg}") from e
-
+        try:
             # Scan files inside temporary repository directory
             temp_path = Path(temp_dir)
             for root, dirs, files in os.walk(temp_dir):
@@ -130,9 +180,15 @@ class GitHubService:
                                 "content": content
                             })
                         except Exception as e:
-                            # Log/capture or continue if a specific file fails to read
-                            # For safety, we will skip files that cannot be read
+                            logger.warning("Failed to read file %s: %s", file_path, e)
                             continue
+        finally:
+            if os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                    logger.info("Cleaned up temporary directory %s after file scanning", temp_dir)
+                except Exception as cleanup_err:
+                    logger.exception("Failed to clean up temporary directory %s after scanning", temp_dir)
 
         return results
 
@@ -168,3 +224,4 @@ class GitHubService:
             start += chunk_size - chunk_overlap
 
         return chunks
+
