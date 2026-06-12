@@ -1,4 +1,10 @@
+import logging
 from typing import Any, Dict, List, Optional
+import chromadb
+from chromadb.api import ClientAPI
+from chromadb.api.models.Collection import Collection
+
+logger = logging.getLogger(__name__)
 
 class VectorStoreManager:
     """
@@ -14,15 +20,21 @@ class VectorStoreManager:
             db_path: Path to the persistent Chroma directory.
         """
         self.db_path = db_path
-        self._client: Optional[Any] = None
+        self._client: Optional[ClientAPI] = None
 
-    def get_client(self) -> Any:
+    def get_client(self) -> ClientAPI:
         """
         Lazily initialize and return the Chroma persistent client.
         """
-        raise NotImplementedError("VectorStoreManager.get_client is not implemented.")
+        if self._client is None:
+            logger.info("Initializing persistent Chroma client at %s", self.db_path)
+            self._client = chromadb.PersistentClient(
+                path=self.db_path,
+                settings=chromadb.config.Settings(allow_reset=True)
+            )
+        return self._client
 
-    def get_collection(self, collection_name: str) -> Any:
+    def get_collection(self, collection_name: str) -> Collection:
         """
         Get or create a Chroma collection by name.
         
@@ -32,7 +44,9 @@ class VectorStoreManager:
         Returns:
             The collection object.
         """
-        raise NotImplementedError("VectorStoreManager.get_collection is not implemented.")
+        logger.info("Getting or creating collection: %s", collection_name)
+        client = self.get_client()
+        return client.get_or_create_collection(name=collection_name)
         
     def add_documents(
         self, 
@@ -52,7 +66,26 @@ class VectorStoreManager:
             metadatas: Associated file metadata (file path, range, etc.).
             ids: List of unique document identifiers.
         """
-        raise NotImplementedError("VectorStoreManager.add_documents is not implemented.")
+        if not ids:
+            logger.warning("Empty list of document IDs provided. No documents added.")
+            return
+
+        if not (len(documents) == len(embeddings) == len(metadatas) == len(ids)):
+            logger.error(
+                "Mismatched list sizes: documents=%d, embeddings=%d, metadatas=%d, ids=%d",
+                len(documents), len(embeddings), len(metadatas), len(ids)
+            )
+            raise ValueError("All lists must be of the same length.")
+
+        logger.info("Adding %d documents to collection: %s", len(ids), collection_name)
+        collection = self.get_collection(collection_name)
+        collection.add(
+            ids=ids,
+            embeddings=embeddings,
+            metadatas=metadatas,
+            documents=documents
+        )
+        logger.debug("Successfully added documents to collection %s", collection_name)
         
     def query_similarity(
         self, 
@@ -73,4 +106,73 @@ class VectorStoreManager:
         Returns:
             List of documents, distances, and metadata corresponding to matches.
         """
-        raise NotImplementedError("VectorStoreManager.query_similarity is not implemented.")
+        logger.info("Querying collection: %s for similarity", collection_name)
+        collection = self.get_collection(collection_name)
+        
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=top_k,
+            where=where_metadata
+        )
+        
+        mapped_results: List[Dict[str, Any]] = []
+        if results and "ids" in results and results["ids"]:
+            ids = results["ids"][0]
+            documents = results.get("documents", [None])[0] if results.get("documents") else [None] * len(ids)
+            distances = results.get("distances", [None])[0] if results.get("distances") else [None] * len(ids)
+            metadatas = results.get("metadatas", [None])[0] if results.get("metadatas") else [None] * len(ids)
+            
+            for idx in range(len(ids)):
+                mapped_results.append({
+                    "id": ids[idx],
+                    "document": documents[idx] if documents else None,
+                    "distance": distances[idx] if distances else None,
+                    "metadata": metadatas[idx] if metadatas else None
+                })
+        
+        logger.debug("Query similarity returned %d results", len(mapped_results))
+        return mapped_results
+
+    def reset_collection(self, collection_name: str) -> None:
+        """
+        Delete a collection by name if it exists, effectively resetting it.
+        
+        Args:
+            collection_name: The collection to delete.
+        """
+        logger.info("Resetting collection: %s", collection_name)
+        client = self.get_client()
+        try:
+            client.delete_collection(name=collection_name)
+            logger.debug("Successfully deleted collection %s", collection_name)
+        except ValueError as e:
+            logger.warning("Could not reset collection %s: %s", collection_name, e)
+        except Exception as e:
+            logger.exception("Unexpected error resetting collection %s", collection_name)
+            raise
+
+    def reset_database(self) -> None:
+        """
+        Completely reset the persistent database client, deleting all collections.
+        """
+        logger.info("Resetting entire persistent database at %s", self.db_path)
+        client = self.get_client()
+        try:
+            client.reset()
+            logger.debug("Successfully reset the database client.")
+        except Exception as e:
+            logger.exception("Failed to reset database client")
+            raise
+
+    def close(self) -> None:
+        """
+        Close the persistent Chroma client connection, releasing any file locks.
+        """
+        if self._client is not None:
+            logger.info("Closing persistent Chroma client.")
+            try:
+                self._client.close()
+            except Exception as e:
+                logger.warning("Error closing Chroma client: %s", e)
+            finally:
+                self._client = None
