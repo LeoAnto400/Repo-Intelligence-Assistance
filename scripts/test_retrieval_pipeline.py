@@ -12,6 +12,7 @@ from src.core.config import settings
 from src.services.github import GitHubService
 from src.services.chunker import CodeChunker, CodeFile
 from src.services.gemini import GeminiService
+from src.services.ingestion import filter_chunks_for_embedding
 from src.db.chroma import VectorStoreManager
 from src.agents.retrieval import RetrievalAgent
 
@@ -60,8 +61,14 @@ async def main():
             return
             
         # 4. Generate embeddings
-        print("\nStep 4: Generating embeddings using GeminiService (batching)...")
-        texts = [c.content for c in all_chunks]
+        print("\nStep 4: Validating chunks before embedding...")
+        embeddable_chunks = filter_chunks_for_embedding(all_chunks)
+        skipped_chunks = len(all_chunks) - len(embeddable_chunks)
+        print(
+            f"Skipped {skipped_chunks} empty/whitespace-only chunks. "
+            f"Generating embeddings for {len(embeddable_chunks)} chunks using GeminiService (batching)..."
+        )
+        texts = [c.content for c in embeddable_chunks]
         embeddings = gemini_service.generate_embeddings_batch(texts)
         print(f"Generated {len(embeddings)} embeddings vectors.")
         
@@ -76,10 +83,10 @@ async def main():
         print(f"\nStep 5: Storing chunks in ChromaDB collection: '{collection_name}'")
         vector_store.reset_collection(collection_name)
         
-        documents = [c.content for c in all_chunks]
-        ids = [c.chunk_id for c in all_chunks]
+        documents = [c.content for c in embeddable_chunks]
+        ids = [c.chunk_id for c in embeddable_chunks]
         metadatas = []
-        for c in all_chunks:
+        for c in embeddable_chunks:
             meta = dict(c.metadata)
             meta["file_path"] = c.file_path
             metadatas.append(meta)
