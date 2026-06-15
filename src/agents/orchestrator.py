@@ -1,73 +1,103 @@
-from typing import Any, Dict, List, TypedDict
+import logging
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, TypedDict
+
+from src.agents.analysis import AnalysisAgent
 from src.agents.base import BaseAgent
 from src.agents.retrieval import RetrievalAgent
-from src.agents.analysis import AnalysisAgent
+
+logger = logging.getLogger(__name__)
+
 
 class AgentState(TypedDict):
     """
-    State dictionary used to maintain history, progress, and variables 
-    across the multi-agent execution pipeline.
+    Runtime state for the first non-LangGraph orchestrator workflow.
     """
-    query: str
-    repository_id: str
-    retrieved_contexts: List[Dict[str, Any]]
-    analysis_result: str
-    error: str | None
+    question: str
+    retrieval_results: List[Dict[str, Any]]
+    analysis_result: Optional[Dict[str, Any]]
+    error: Optional[str]
+
+
+@dataclass
+class OrchestratorResult:
+    answer: str
+    source_files: List[str]
+    retrieved_chunks: int
+
 
 class Orchestrator(BaseAgent):
     """
-    Orchestrator Agent coordinate routing, parses initial queries, executes the
-    retrieval nodes, passes context to analysis nodes, and compiles the final response.
+    Coordinates retrieval and analysis agents without introducing LangGraph yet.
     """
-    
+
     def __init__(self, retrieval_agent: RetrievalAgent, analysis_agent: AnalysisAgent):
-        """
-        Initialize the orchestrator agent.
-        
-        Args:
-            retrieval_agent: Sub-agent for fetching code snippets.
-            analysis_agent: Sub-agent for processing retrieved context.
-        """
         self.retrieval_agent = retrieval_agent
         self.analysis_agent = analysis_agent
-        self._compiled_graph = None  # Placeholder for compiled LangGraph graph
+        self.last_state: Optional[AgentState] = None
+        logger.info("Orchestrator initialized.")
 
-    def compile_workflow_graph(self) -> Any:
+    async def process(self, question: str) -> OrchestratorResult:
         """
-        Build and compile the LangGraph workflow structure.
-        
-        Defines state transitions:
-            Start -> retrieval_node -> analysis_node -> End
-            
-        Returns:
-            Compiled LangGraph runnable workflow.
+        Run retrieval followed by analysis for a user question.
         """
-        raise NotImplementedError("Orchestrator.compile_workflow_graph is not implemented.")
-
-    async def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Entry point to process a repository query through the orchestrator.
-        Loads state and runs workflow graph.
-        
-        Expected payload format:
-        {
-            "query": str,
-            "repository_id": str
+        state: AgentState = {
+            "question": question,
+            "retrieval_results": [],
+            "analysis_result": None,
+            "error": None,
         }
-        
-        Returns:
-            Dict containing the final answer, status, and metadata.
-        """
-        raise NotImplementedError("Orchestrator.process is not implemented.")
+        self.last_state = state
 
-    async def retrieval_node(self, state: AgentState) -> Dict[str, Any]:
-        """
-        State node calling the RetrievalAgent to fetch code blocks.
-        """
-        raise NotImplementedError("Orchestrator.retrieval_node is not implemented.")
+        if not question or not isinstance(question, str) or not question.strip():
+            state["error"] = "Question cannot be empty."
+            logger.error("Orchestrator received an empty or invalid question.")
+            raise ValueError(state["error"])
 
-    async def analysis_node(self, state: AgentState) -> Dict[str, Any]:
-        """
-        State node calling the AnalysisAgent to explain code blocks.
-        """
-        raise NotImplementedError("Orchestrator.analysis_node is not implemented.")
+        normalized_question = question.strip()
+        state["question"] = normalized_question
+
+        try:
+            retrieval_response = await self.retrieval_agent.process({
+                "query": normalized_question
+            })
+        except Exception as e:
+            state["error"] = f"Retrieval agent failed: {e}"
+            logger.exception("RetrievalAgent.process raised during orchestration.")
+            raise RuntimeError(state["error"]) from e
+
+        retrieval_error = retrieval_response.get("error")
+        if retrieval_error:
+            state["error"] = f"Retrieval failed: {retrieval_error}"
+            logger.error("Retrieval failed during orchestration: %s", retrieval_error)
+            raise RuntimeError(state["error"])
+
+        retrieval_results = retrieval_response.get("results") or []
+        if not isinstance(retrieval_results, list):
+            state["error"] = "Retrieval agent returned invalid 'results'; expected a list."
+            logger.error(state["error"])
+            raise RuntimeError(state["error"])
+        state["retrieval_results"] = retrieval_results
+
+        try:
+            analysis_response = await self.analysis_agent.process({
+                "question": normalized_question,
+                "retrieval_results": retrieval_results,
+            })
+        except Exception as e:
+            state["error"] = f"Analysis agent failed: {e}"
+            logger.exception("AnalysisAgent.process raised during orchestration.")
+            raise RuntimeError(state["error"]) from e
+
+        state["analysis_result"] = analysis_response
+        analysis_error = analysis_response.get("error")
+        if analysis_error:
+            state["error"] = f"Analysis failed: {analysis_error}"
+            logger.error("Analysis failed during orchestration: %s", analysis_error)
+            raise RuntimeError(state["error"])
+
+        return OrchestratorResult(
+            answer=analysis_response.get("answer", ""),
+            source_files=analysis_response.get("source_files", []),
+            retrieved_chunks=len(retrieval_results),
+        )
