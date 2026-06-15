@@ -145,11 +145,13 @@ class VectorStoreManager:
         try:
             client.delete_collection(name=collection_name)
             logger.debug("Successfully deleted collection %s", collection_name)
-        except ValueError as e:
-            logger.warning("Could not reset collection %s: %s", collection_name, e)
         except Exception as e:
-            logger.exception("Unexpected error resetting collection %s", collection_name)
-            raise
+            err_msg = str(e)
+            if "not exist" in err_msg.lower() or "notfound" in err_msg.lower() or "not found" in err_msg.lower():
+                logger.info("Collection %s does not exist, skipping deletion.", collection_name)
+            else:
+                logger.exception("Unexpected error resetting collection %s", collection_name)
+                raise
 
     def reset_database(self) -> None:
         """

@@ -42,6 +42,25 @@ IGNORE_DIRS = {
     "__pycache__"
 }
 
+def safe_rmtree(path: str) -> None:
+    """
+    Safely remove directory tree, handling Windows read-only file permission issues (e.g. from .git).
+    """
+    try:
+        shutil.rmtree(path)
+    except Exception:
+        try:
+            import stat
+            def _handle_readonly(func, p, exc_info):
+                try:
+                    os.chmod(p, stat.S_IWRITE)
+                    func(p)
+                except Exception:
+                    pass
+            shutil.rmtree(path, onerror=_handle_readonly)
+        except Exception as e:
+            logger.warning("Failed to safely remove directory %s: %s", path, e)
+
 class GitHubService:
     """
     Handles cloning GitHub repositories locally, scanning their directories,
@@ -119,7 +138,7 @@ class GitHubService:
             logger.error("Git clone failed: %s", err_msg)
             if os.path.exists(temp_dir):
                 try:
-                    shutil.rmtree(temp_dir)
+                    safe_rmtree(temp_dir)
                     logger.info("Cleaned up temporary directory %s after clone failure", temp_dir)
                 except Exception as cleanup_err:
                     logger.exception("Failed to clean up directory %s after clone failure", temp_dir)
@@ -128,7 +147,7 @@ class GitHubService:
             logger.exception("An unexpected error occurred during repository clone")
             if os.path.exists(temp_dir):
                 try:
-                    shutil.rmtree(temp_dir)
+                    safe_rmtree(temp_dir)
                     logger.info("Cleaned up temporary directory %s after clone failure", temp_dir)
                 except Exception as cleanup_err:
                     logger.exception("Failed to clean up directory %s after clone failure", temp_dir)
@@ -185,7 +204,7 @@ class GitHubService:
         finally:
             if os.path.exists(temp_dir):
                 try:
-                    shutil.rmtree(temp_dir)
+                    safe_rmtree(temp_dir)
                     logger.info("Cleaned up temporary directory %s after file scanning", temp_dir)
                 except Exception as cleanup_err:
                     logger.exception("Failed to clean up temporary directory %s after scanning", temp_dir)

@@ -1,0 +1,25 @@
+# Environment variables
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+
+# ChromaDB
+chroma_db/
+
+# Temporary cloned repositories
+.temp_clones/
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -160,5 +160,80 @@ class TestCodeChunker(unittest.TestCase):
         # Different file path -> different ID
         self.assertNotEqual(chunks1[0].chunk_id, chunks3[0].chunk_id)
 
+    def test_oversized_function_is_split_with_metadata_preserved(self):
+        chunker = CodeChunker(max_chunk_chars=160, overlap_chars=30)
+        body = "".join(
+            f"    value_{i} = 'this line makes the function large enough to split'\n"
+            for i in range(12)
+        )
+        content = "def big_function():\n" + body + "    return value_11\n"
+        code_file = CodeFile(
+            file_path="src/big.py",
+            content=content,
+            language="Python",
+            metadata={"repo_name": "test-repo", "owner": "dev"}
+        )
+
+        chunks = chunker.chunk_file(code_file)
+
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(chunk.content) <= 160 for chunk in chunks))
+        self.assertTrue(all(chunk.chunk_type == "function" for chunk in chunks))
+        self.assertTrue(all(chunk.metadata["name"] == "big_function" for chunk in chunks))
+        self.assertTrue(all(chunk.metadata["repo_name"] == "test-repo" for chunk in chunks))
+        self.assertTrue(all(chunk.metadata["owner"] == "dev" for chunk in chunks))
+        self.assertTrue(all(chunk.metadata["split_from_oversized"] for chunk in chunks))
+        self.assertEqual([chunk.metadata["chunk_part"] for chunk in chunks], list(range(1, len(chunks) + 1)))
+        self.assertTrue(all(chunk.metadata["chunk_parts"] == len(chunks) for chunk in chunks))
+        self.assertEqual(len({chunk.metadata["parent_chunk_id"] for chunk in chunks}), 1)
+
+        for left, right in zip(chunks, chunks[1:]):
+            self.assertEqual(left.content[-30:], right.content[:30])
+
+    def test_oversized_class_is_split_with_association_preserved(self):
+        chunker = CodeChunker(max_chunk_chars=180, overlap_chars=25)
+        body = "".join(
+            f"        self.value_{i} = 'this line makes the class large enough to split'\n"
+            for i in range(12)
+        )
+        content = "class BigClass:\n    def configure(self):\n" + body
+        code_file = CodeFile(
+            file_path="src/big_class.py",
+            content=content,
+            language="Python",
+            metadata={"repo_name": "test-repo"}
+        )
+
+        chunks = chunker.chunk_file(code_file)
+
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(chunk.content) <= 180 for chunk in chunks))
+        self.assertTrue(all(chunk.chunk_type == "class" for chunk in chunks))
+        self.assertTrue(all(chunk.metadata["name"] == "BigClass" for chunk in chunks))
+        self.assertTrue(all(chunk.metadata["repo_name"] == "test-repo" for chunk in chunks))
+        self.assertTrue(all(chunk.metadata["split_from_oversized"] for chunk in chunks))
+
+    def test_chunk_size_diagnostics_identify_oversized_chunks(self):
+        chunker = CodeChunker(max_chunk_chars=140, overlap_chars=20)
+        body = "".join(
+            f"    item_{i} = 'diagnostic payload that should exceed the limit'\n"
+            for i in range(8)
+        )
+        code_file = CodeFile(
+            file_path="src/diagnostic.py",
+            content="def noisy():\n" + body,
+            language="Python"
+        )
+
+        with self.assertLogs("src.services.chunker", level="INFO") as logs:
+            chunks = chunker.chunk_file(code_file)
+
+        log_output = "\n".join(logs.output)
+        self.assertIn("average_chars", log_output)
+        self.assertIn("largest_chars", log_output)
+        self.assertIn("top_10_largest", log_output)
+        self.assertIn("exceeding 140 characters", log_output)
+        self.assertTrue(all(len(chunk.content) <= 140 for chunk in chunks))
+
 if __name__ == "__main__":
     unittest.main()

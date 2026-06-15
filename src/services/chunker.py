@@ -2,7 +2,7 @@ import ast
 import hashlib
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,17 @@ class CodeChunker:
     For unsupported languages or parsing failures, it falls back to file-level chunks.
     """
 
+    def __init__(self, max_chunk_chars: int = 4000, overlap_chars: int = 200):
+        if max_chunk_chars <= 0:
+            raise ValueError("max_chunk_chars must be positive.")
+        if overlap_chars < 0:
+            raise ValueError("overlap_chars cannot be negative.")
+        if overlap_chars >= max_chunk_chars:
+            raise ValueError("overlap_chars must be less than max_chunk_chars.")
+
+        self.max_chunk_chars = max_chunk_chars
+        self.overlap_chars = overlap_chars
+
     def chunk_file(self, code_file: CodeFile) -> List[Chunk]:
         """
         Chunks a given CodeFile object based on its language and contents.
@@ -45,23 +56,27 @@ class CodeChunker:
         Returns:
             A list of Chunk objects.
         """
+        chunks: List[Chunk]
         if not code_file.content or not code_file.content.strip():
             logger.info("Empty code file content for: %s", code_file.file_path)
-            return [self._create_file_chunk(code_file, "file")]
+            chunks = [self._create_file_chunk(code_file, "file")]
+            return self._finalize_chunks(chunks, code_file.file_path)
 
         if code_file.language.lower() == "python":
             try:
-                return self._chunk_python_file(code_file)
+                chunks = self._chunk_python_file(code_file)
             except Exception as e:
                 logger.warning(
                     "Python parsing failed for %s (falling back to file-level chunk): %s", 
                     code_file.file_path, 
                     e
                 )
-                return [self._create_file_chunk(code_file, "file")]
+                chunks = [self._create_file_chunk(code_file, "file")]
         else:
             # Fall back to file-level chunk for other/unsupported languages
-            return [self._create_file_chunk(code_file, "file")]
+            chunks = [self._create_file_chunk(code_file, "file")]
+
+        return self._finalize_chunks(chunks, code_file.file_path)
 
     def _create_file_chunk(self, code_file: CodeFile, chunk_type: str) -> Chunk:
         """Helper to create a standard file-level chunk."""
@@ -83,13 +98,158 @@ class CodeChunker:
             metadata=merged_metadata
         )
 
-    def _generate_chunk_id(self, file_path: str, chunk_type: str, content: str) -> str:
+    def _generate_chunk_id(
+        self,
+        file_path: str,
+        chunk_type: str,
+        content: str,
+        suffix: Optional[str] = None
+    ) -> str:
         """Generates a unique, stable SHA-256 hash for the chunk."""
         hasher = hashlib.sha256()
         hasher.update(file_path.encode("utf-8"))
         hasher.update(chunk_type.encode("utf-8"))
         hasher.update(content.encode("utf-8"))
+        if suffix:
+            hasher.update(suffix.encode("utf-8"))
         return hasher.hexdigest()
+
+    def _finalize_chunks(self, chunks: List[Chunk], file_path: str) -> List[Chunk]:
+        self._log_chunk_size_diagnostics(chunks, file_path)
+        oversized_chunks = [
+            chunk for chunk in chunks if len(chunk.content) > self.max_chunk_chars
+        ]
+        if oversized_chunks:
+            oversized_summary = [
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "chunk_type": chunk.chunk_type,
+                    "name": chunk.metadata.get("name"),
+                    "start_line": chunk.metadata.get("start_line"),
+                    "end_line": chunk.metadata.get("end_line"),
+                    "chars": len(chunk.content)
+                }
+                for chunk in oversized_chunks
+            ]
+            logger.warning(
+                "Found %d chunks exceeding %d characters in %s: %s",
+                len(oversized_chunks),
+                self.max_chunk_chars,
+                file_path,
+                oversized_summary
+            )
+
+        split_chunks: List[Chunk] = []
+        for chunk in chunks:
+            split_chunks.extend(self._split_oversized_chunk(chunk))
+
+        if len(split_chunks) != len(chunks):
+            self._log_chunk_size_diagnostics(split_chunks, f"{file_path} after splitting")
+
+        return split_chunks
+
+    def _log_chunk_size_diagnostics(self, chunks: List[Chunk], context: str) -> None:
+        if not chunks:
+            logger.info("Chunk size diagnostics for %s: no chunks generated", context)
+            return
+
+        sizes = [len(chunk.content) for chunk in chunks]
+        average_size = sum(sizes) / len(sizes)
+        largest_size = max(sizes)
+        top_chunks = sorted(
+            chunks,
+            key=lambda chunk: len(chunk.content),
+            reverse=True
+        )[:10]
+        top_summary = [
+            {
+                "rank": index + 1,
+                "chunk_id": chunk.chunk_id,
+                "chunk_type": chunk.chunk_type,
+                "name": chunk.metadata.get("name"),
+                "start_line": chunk.metadata.get("start_line"),
+                "end_line": chunk.metadata.get("end_line"),
+                "chars": len(chunk.content)
+            }
+            for index, chunk in enumerate(top_chunks)
+        ]
+
+        logger.info(
+            "Chunk size diagnostics for %s: count=%d, average_chars=%.2f, "
+            "largest_chars=%d, top_10_largest=%s",
+            context,
+            len(chunks),
+            average_size,
+            largest_size,
+            top_summary
+        )
+
+    def _split_oversized_chunk(self, chunk: Chunk) -> List[Chunk]:
+        if len(chunk.content) <= self.max_chunk_chars:
+            return [chunk]
+
+        subcontents = self._split_text_with_overlap(chunk.content)
+        total_parts = len(subcontents)
+        subchunks: List[Chunk] = []
+
+        for index, subcontent in enumerate(subcontents, start=1):
+            metadata = dict(chunk.metadata)
+            metadata.update({
+                "parent_chunk_id": chunk.chunk_id,
+                "chunk_part": index,
+                "chunk_parts": total_parts,
+                "split_from_oversized": True
+            })
+
+            suffix = f"part:{index}/{total_parts}"
+            subchunks.append(Chunk(
+                chunk_id=self._generate_chunk_id(
+                    chunk.file_path,
+                    chunk.chunk_type,
+                    subcontent,
+                    suffix=suffix
+                ),
+                file_path=chunk.file_path,
+                content=subcontent,
+                chunk_type=chunk.chunk_type,
+                metadata=metadata
+            ))
+
+        return subchunks
+
+    def _split_text_with_overlap(self, text: str) -> List[str]:
+        if len(text) <= self.max_chunk_chars:
+            return [text]
+
+        chunks: List[str] = []
+        start = 0
+        text_length = len(text)
+
+        while start < text_length:
+            hard_end = min(start + self.max_chunk_chars, text_length)
+            end = self._find_line_break_before(text, start, hard_end)
+            if end <= start:
+                end = hard_end
+
+            chunks.append(text[start:end])
+            if end >= text_length:
+                break
+
+            next_start = max(0, end - self.overlap_chars)
+            if next_start <= start:
+                next_start = end
+            start = next_start
+
+        return chunks
+
+    def _find_line_break_before(self, text: str, start: int, hard_end: int) -> int:
+        if hard_end >= len(text):
+            return hard_end
+
+        break_at = text.rfind("\n", start + 1, hard_end + 1)
+        if break_at == -1:
+            return hard_end
+        return break_at + 1
 
     def _chunk_python_file(self, code_file: CodeFile) -> List[Chunk]:
         """Parses a Python file using AST and extracts classes and functions as chunks."""
