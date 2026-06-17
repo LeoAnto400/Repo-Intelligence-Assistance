@@ -1,24 +1,24 @@
-from pydantic import BaseModel, HttpUrl
-from typing import List, Dict, Any, Optional
+from typing import List
+
+from pydantic import BaseModel
 
 class IngestRequest(BaseModel):
     """Payload to request ingestion and indexing of a repository."""
-    repository_url: HttpUrl
+    repo_url: str
 
 class IngestResponse(BaseModel):
-    """Response returned upon successfully queueing or initiating repository ingestion."""
-    repository_id: str
+    """Response returned after repository ingestion completes."""
     status: str
-    message: str
+    repository: str
+    files_processed: int
+    chunks_created: int
 
 class QueryRequest(BaseModel):
     """Payload to run a query against a previously ingested repository."""
-    repository_id: str
-    query: str
+    question: str
 
 class QueryResponse(BaseModel):
     """Response returned after processing a repository intelligence query."""
-    repository_id: str
-    query: str
     answer: str
-    sources: Optional[List[Dict[str, Any]]] = None
+    source_files: List[str]
+    retrieved_chunks: int

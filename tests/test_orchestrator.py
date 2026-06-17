@@ -30,6 +30,78 @@ class TestOrchestrator(unittest.IsolatedAsyncioTestCase):
             analysis_agent=self.analysis_agent,
         )
 
+    def test_graph_is_compiled_on_initialization(self):
+        self.assertIsNotNone(self.orchestrator._compiled_graph)
+        self.assertTrue(hasattr(self.orchestrator._compiled_graph, "ainvoke"))
+
+    async def test_retrieval_node_executes_and_stores_results(self):
+        retrieval_results = [
+            {
+                "chunk_id": "chunk-1",
+                "file_path": "src/auth.py",
+                "content": "def login(): pass",
+                "score": 0.1,
+                "metadata": {"chunk_type": "function"},
+            }
+        ]
+        self.retrieval_agent.process.return_value = {
+            "results": retrieval_results,
+            "error": None,
+        }
+        state: AgentState = {
+            "question": "How does auth work?",
+            "retrieval_results": [],
+            "analysis_result": None,
+            "error": None,
+        }
+
+        update = await self.orchestrator.retrieval_node(state)
+
+        self.assertEqual(update, {
+            "retrieval_results": retrieval_results,
+            "error": None,
+        })
+        self.retrieval_agent.process.assert_awaited_once_with({
+            "query": "How does auth work?"
+        })
+        self.assertEqual(self.orchestrator.last_state["retrieval_results"], retrieval_results)
+
+    async def test_analysis_node_executes_and_stores_result(self):
+        retrieval_results = [
+            {
+                "chunk_id": "chunk-1",
+                "file_path": "src/auth.py",
+                "content": "def login(): pass",
+                "score": 0.1,
+                "metadata": {"chunk_type": "function"},
+            }
+        ]
+        analysis_result = {
+            "answer": "Auth uses login.",
+            "source_files": ["src/auth.py"],
+            "chunk_count": 1,
+            "error": None,
+        }
+        self.analysis_agent.process.return_value = analysis_result
+        state: AgentState = {
+            "question": "How does auth work?",
+            "retrieval_results": retrieval_results,
+            "analysis_result": None,
+            "error": None,
+        }
+
+        update = await self.orchestrator.analysis_node(state)
+
+        self.assertEqual(update, {
+            "analysis_result": analysis_result,
+            "error": None,
+        })
+        self.analysis_agent.process.assert_awaited_once_with({
+            "question": "How does auth work?",
+            "retrieval_results": retrieval_results,
+        })
+        self.assertEqual(self.orchestrator.last_state["analysis_result"], analysis_result)
+
     async def test_process_coordinates_retrieval_and_analysis(self):
         retrieval_results = [
             {
@@ -79,6 +151,38 @@ class TestOrchestrator(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.orchestrator.last_state["retrieval_results"], retrieval_results)
         self.assertEqual(self.orchestrator.last_state["analysis_result"]["answer"], result.answer)
         self.assertIsNone(self.orchestrator.last_state["error"])
+
+    async def test_complete_graph_execution_runs_retrieve_then_analyze(self):
+        calls = []
+        retrieval_results = [{"chunk_id": "chunk-1", "content": "code"}]
+
+        async def retrieval_side_effect(payload):
+            calls.append(("retrieve", payload))
+            return {"results": retrieval_results, "error": None}
+
+        async def analysis_side_effect(payload):
+            calls.append(("analyze", payload))
+            return {
+                "answer": "The code is indexed.",
+                "source_files": [],
+                "chunk_count": 1,
+                "error": None,
+            }
+
+        self.retrieval_agent.process.side_effect = retrieval_side_effect
+        self.analysis_agent.process.side_effect = analysis_side_effect
+
+        result = await self.orchestrator.process("What is indexed?")
+
+        self.assertEqual(result.answer, "The code is indexed.")
+        self.assertEqual(result.retrieved_chunks, 1)
+        self.assertEqual(calls, [
+            ("retrieve", {"query": "What is indexed?"}),
+            ("analyze", {
+                "question": "What is indexed?",
+                "retrieval_results": retrieval_results,
+            }),
+        ])
 
     async def test_process_rejects_empty_question(self):
         with self.assertRaises(ValueError) as context:
