@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     GEMINI_EMBEDDING_MAX_BATCH_CHARS: int = Field(12000, description="Maximum total characters to send per Gemini embedding request")
     GEMINI_EMBEDDING_BATCH_DELAY_SECONDS: float = Field(0.5, description="Delay between Gemini embedding sub-batches")
     
+    # Ingestion Pipeline Resilience Settings
+    EMBED_BATCH_SIZE: int = Field(5, description="Maximum number of chunks to send per Gemini embedding request")
+    EMBED_BATCH_DELAY: float = Field(0.5, description="Delay between Gemini embedding batches in seconds")
+    MAX_RETRIES: int = Field(5, description="Maximum retries for rate-limited calls")
+    MAX_TOKENS_PER_BATCH: int = Field(10000, description="Maximum estimated input tokens per request batch")
+    MAX_REQUESTS_PER_MINUTE: int = Field(100, description="Maximum API requests per minute to stay below limit")
+    
     # Vector Database
     CHROMA_DB_DIR: str = Field("./chroma_db", description="Local directory path where ChromaDB collections are stored")
     

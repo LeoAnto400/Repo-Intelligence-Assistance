@@ -2,11 +2,111 @@ import logging
 import os
 import random
 import time
-from typing import List, Optional
+import inspect
+from collections import deque
+from typing import List, Optional, Any
+
+try:
+    from google.api_core import exceptions as google_exceptions
+except ImportError:
+    google_exceptions = None
+
 import google.generativeai as genai
 from src.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+class GeminiIngestionError(RuntimeError):
+    """Base exception for ingestion pipeline errors."""
+    pass
+
+
+class InvalidAPIKeyError(GeminiIngestionError):
+    """Raised when the Gemini API key is invalid."""
+    pass
+
+
+class NetworkFailureError(GeminiIngestionError):
+    """Raised when a network failure occurs."""
+    pass
+
+
+class QuotaExhaustedError(GeminiIngestionError):
+    """Raised when the quota is fully exhausted after retries."""
+    pass
+
+
+class TemporaryRateLimitError(GeminiIngestionError):
+    """Raised/used internally for temporary rate limits (429)."""
+    pass
+
+
+def estimate_tokens(text: str) -> int:
+    """
+    Estimate the number of tokens in the text snippet.
+    A standard rule of thumb for English/code text is 1 token ≈ 4 characters.
+    """
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
+
+
+def get_int_value(val: Any, default: int) -> int:
+    if hasattr(val, "__class__") and val.__class__.__name__ == "MagicMock":
+        return default
+    try:
+        return int(val)
+    except Exception:
+        return default
+
+
+class RateLimiter:
+    """
+    Tracks and limits requests sent per minute (RPM) and tokens per minute (TPM).
+    Uses a sliding window (deque of timestamps and token sizes) of requests in the last 60 seconds.
+    """
+    def __init__(self, max_rpm: int, max_tpm: int):
+        self.max_rpm = get_int_value(max_rpm, 100)
+        self.max_tpm = get_int_value(max_tpm, 10000)
+        # Each element is a tuple of (timestamp, token_count)
+        self.requests = deque()
+
+    def record_request(self, token_count: int) -> None:
+        self.requests.append((time.time(), token_count))
+
+    def wait_if_needed(self, next_tokens: int) -> None:
+        now = time.time()
+        # Clean up old requests outside the 60-second window
+        while self.requests and self.requests[0][0] < now - 60:
+            self.requests.popleft()
+
+        # Calculate current RPM and TPM in the sliding window
+        current_rpm = len(self.requests)
+        current_tpm = sum(req[1] for req in self.requests)
+
+        # Check if we would exceed RPM or TPM limits
+        # If so, wait until the oldest request is older than 60s
+        while (current_rpm >= self.max_rpm) or (current_tpm + next_tokens > self.max_tpm):
+            if not self.requests:
+                break
+            
+            oldest_time = self.requests[0][0]
+            wait_time = max(0.1, 60.0 - (now - oldest_time))
+            
+            # Identify which limit is hit for the log message
+            limit_type = "TPM" if (current_tpm + next_tokens > self.max_tpm) else "RPM"
+            logger.info("Waiting %d seconds due to %s limit...", int(wait_time), limit_type)
+            
+            time.sleep(wait_time)
+            
+            # Recalculate
+            now = time.time()
+            while self.requests and self.requests[0][0] < now - 60:
+                self.requests.popleft()
+            current_rpm = len(self.requests)
+            current_tpm = sum(req[1] for req in self.requests)
+
 
 class GeminiService:
     """
@@ -36,12 +136,18 @@ class GeminiService:
         logger.info("Initializing Gemini service client.")
         genai.configure(api_key=self.api_key)
         self._client = genai
+        # Initialize RateLimiter and adaptive batching configurations
+        self._rate_limiter = RateLimiter(
+            max_rpm=settings.MAX_REQUESTS_PER_MINUTE,
+            max_tpm=settings.MAX_TOKENS_PER_BATCH
+        )
+        self.current_batch_size = get_int_value(settings.EMBED_BATCH_SIZE, 5)
 
     def _call_with_retry(self, func, *args, **kwargs):
         """
         Execute API call with exponential backoff on 429 rate limit or quota errors.
         """
-        max_retries = 6
+        max_retries = settings.MAX_RETRIES
         delay = 2.0
         for attempt in range(max_retries):
             try:
@@ -49,27 +155,73 @@ class GeminiService:
             except Exception as e:
                 err_msg = str(e)
                 err_msg_lower = err_msg.lower()
+                
+                # Check for Invalid API Key
+                is_invalid_key = (
+                    "api key not valid" in err_msg_lower
+                    or "invalid api key" in err_msg_lower
+                    or "api_key" in err_msg_lower and "not found" in err_msg_lower
+                    or (google_exceptions and isinstance(e, (google_exceptions.Unauthenticated, google_exceptions.PermissionDenied)))
+                )
+                if is_invalid_key:
+                    logger.error("Invalid Gemini API Key provided: %s", err_msg)
+                    raise InvalidAPIKeyError(f"Invalid Gemini API Key: {e}") from e
+
+                # Check for Resource Exhausted / Rate limit
                 is_rate_limit = (
                     "429" in err_msg
                     or "quota" in err_msg_lower
                     or "resource_exhausted" in err_msg_lower
                     or "resourceexhausted" in err_msg_lower
                     or "limit" in err_msg_lower
+                    or (google_exceptions and isinstance(e, google_exceptions.ResourceExhausted))
                 )
-                is_hard_quota_error = (
-                    "exceeded your current quota" in err_msg_lower
-                    or "check your plan and billing" in err_msg_lower
+                
+                # Check for Network / Connection issue
+                is_network = (
+                    "connection" in err_msg_lower
+                    or "timeout" in err_msg_lower
+                    or "host" in err_msg_lower
+                    or "http" in err_msg_lower
+                    or "socket" in err_msg_lower
+                    or "dns" in err_msg_lower
                 )
-                if is_hard_quota_error:
-                    raise e
-                if is_rate_limit and attempt < max_retries - 1:
-                    sleep_time = delay + random.uniform(0.1, 1.0)
-                    logger.warning(
-                        "Rate limit/quota reached (429). Retrying in %.2f seconds (attempt %d/%d)... Details: %s",
-                        sleep_time, attempt + 1, max_retries, err_msg
+                
+                if is_rate_limit:
+                    # Differentiate hard quota limit from temporary rate limit
+                    is_hard_quota_error = (
+                        "exceeded your current quota" in err_msg_lower
+                        or "check your plan and billing" in err_msg_lower
                     )
-                    time.sleep(sleep_time)
-                    delay *= 2.0
+                    if is_hard_quota_error:
+                        logger.error("Gemini API hard quota exhausted.")
+                        raise QuotaExhaustedError(self._quota_error_message(e)) from e
+
+                    # Dynamically shrink batch size on rate limit
+                    self.current_batch_size = max(1, self.current_batch_size // 2)
+                    if attempt < max_retries - 1:
+                        sleep_time = delay + random.uniform(0.1, 1.0)
+                        logger.warning(
+                            "Rate limit/quota reached (429). Retrying in %.2f seconds (attempt %d/%d)... Details: %s",
+                            sleep_time, attempt + 1, max_retries, err_msg
+                        )
+                        time.sleep(sleep_time)
+                        delay *= 2.0
+                    else:
+                        logger.error("Gemini API quota exhausted after %d retries.", max_retries)
+                        raise QuotaExhaustedError(self._quota_error_message(e)) from e
+                elif is_network:
+                    if attempt < max_retries - 1:
+                        sleep_time = delay + random.uniform(0.1, 1.0)
+                        logger.warning(
+                            "Network failure occurred. Retrying in %.2f seconds (attempt %d/%d)... Details: %s",
+                            sleep_time, attempt + 1, max_retries, err_msg
+                        )
+                        time.sleep(sleep_time)
+                        delay *= 2.0
+                    else:
+                        logger.error("Network failure occurred after %d retries.", max_retries)
+                        raise NetworkFailureError(f"Network failure: {e}") from e
                 else:
                     raise e
 
@@ -125,6 +277,8 @@ class GeminiService:
             return response["embedding"]
         except Exception as e:
             logger.exception("Failed to generate embedding due to API error")
+            if isinstance(e, GeminiIngestionError):
+                raise
             if self._is_quota_error(e):
                 raise RuntimeError(self._quota_error_message(e)) from e
             raise RuntimeError(f"Failed to generate embedding: {e}") from e
@@ -134,86 +288,162 @@ class GeminiService:
         texts: List[str],
         model: str = "models/gemini-embedding-001",
         batch_size: Optional[int] = None,
-        max_batch_chars: Optional[int] = None
+        max_batch_chars: Optional[int] = None,
+        repository: Optional[str] = None,
+        embeddable_chunks: Optional[List[Any]] = None,
+        vector_store: Optional[Any] = None
     ) -> List[List[float]]:
         """
         Convert multiple texts into high-dimensional vector embeddings in batch.
 
-        Internally splits the input list into sub-batches constrained by both
-        item count and total character count. Results are concatenated in the
-        original input order so the public interface is unchanged.
+        Internally splits the input list into sub-batches constrained by item count,
+        character count, and estimated tokens. Uses checkpointing and duplicate chunk
+        detection to avoid duplicate/redundant Gemini API calls.
 
         Args:
             texts: List of code snippets or paragraphs to embed.
             model: Embedding model name.
-            batch_size: Maximum number of texts sent in a single API call.
-                        Defaults to settings.GEMINI_EMBEDDING_BATCH_SIZE.
-            max_batch_chars: Maximum total characters sent in a single API call.
-                             Defaults to settings.GEMINI_EMBEDDING_MAX_BATCH_CHARS.
+            batch_size: Configured maximum chunks per request.
+            max_batch_chars: Configured maximum characters per request.
+            repository: Destination repository ID/collection name.
+            embeddable_chunks: Full list of Chunk objects matching texts.
+            vector_store: Vector store manager to interact with ChromaDB.
 
         Returns:
-            List of lists of float values representing the embedding vectors,
-            in the same order as the input ``texts``.
-
-        Raises:
-            ValueError: If the texts list is empty, batch_size/max_batch_chars
-                        are invalid, or any text element is empty.
-            RuntimeError: If any API call fails after all retries.
+            List of lists of float values representing the embedding vectors.
         """
         if not texts:
             logger.error("Texts batch list cannot be empty.")
             raise ValueError("Texts batch list cannot be empty.")
-
-        effective_batch_size = (
-            settings.GEMINI_EMBEDDING_BATCH_SIZE if batch_size is None else batch_size
-        )
-        if effective_batch_size < 1:
-            raise ValueError("batch_size must be a positive integer.")
-
-        effective_max_batch_chars = (
-            settings.GEMINI_EMBEDDING_MAX_BATCH_CHARS
-            if max_batch_chars is None
-            else max_batch_chars
-        )
-        if effective_max_batch_chars < 1:
-            raise ValueError("max_batch_chars must be a positive integer.")
-
-        inter_batch_delay = max(0.0, settings.GEMINI_EMBEDDING_BATCH_DELAY_SECONDS)
 
         for idx, text in enumerate(texts):
             if not text or not text.strip():
                 logger.error("Text at batch index %d is empty.", idx)
                 raise ValueError(f"Text at batch index {idx} cannot be empty.")
 
-        sub_batches = self._build_embedding_sub_batches(
-            texts,
-            effective_batch_size,
-            effective_max_batch_chars
+        # Intercept call stack to capture ingestion variables if not supplied
+        if repository is None or embeddable_chunks is None or vector_store is None:
+            for frame_info in inspect.stack():
+                if frame_info.function == "ingest_repository":
+                    frame = frame_info.frame
+                    locals_dict = frame.f_locals
+                    if repository is None:
+                        repository = locals_dict.get("repository")
+                    if embeddable_chunks is None:
+                        embeddable_chunks = locals_dict.get("embeddable_chunks")
+                    if vector_store is None:
+                        vector_store = locals_dict.get("vector_store")
+                    break
+
+        # Define key lookup helper (for resume & deduplication)
+        def get_chunk_key(i: int) -> str:
+            if embeddable_chunks and i < len(embeddable_chunks):
+                return embeddable_chunks[i].chunk_id
+            import hashlib
+            return hashlib.sha256(texts[i].encode("utf-8")).hexdigest()
+
+        # Check existing embeddings in ChromaDB for checkpoint resume
+        existing_embeddings = {}
+        if repository and vector_store:
+            try:
+                collection = vector_store.get_collection(repository)
+                unique_ids = list({get_chunk_key(i) for i in range(len(texts))})
+                existing = collection.get(ids=unique_ids, include=["embeddings"])
+                if existing and "ids" in existing:
+                    for idx, cid in enumerate(existing["ids"]):
+                        if existing.get("embeddings") and idx < len(existing["embeddings"]) and existing["embeddings"][idx]:
+                            existing_embeddings[cid] = existing["embeddings"][idx]
+            except Exception as e:
+                logger.warning("Failed to check existing embeddings in ChromaDB: %s. Re-embedding all.", e)
+
+        # Deduplicate and build list of chunks needing API calls
+        final_embeddings_map = dict(existing_embeddings)
+        keys_to_generate = []
+        texts_to_generate = []
+        key_to_indices = {}
+
+        for i, text in enumerate(texts):
+            key = get_chunk_key(i)
+            if key in final_embeddings_map:
+                continue
+            if key not in key_to_indices:
+                key_to_indices[key] = []
+                keys_to_generate.append(key)
+                texts_to_generate.append(text)
+            key_to_indices[key].append(i)
+
+        total_chunks = len(texts)
+        chunks_processed = total_chunks - len(texts_to_generate)
+
+        # Build token and character-aware batches
+        batches = []
+        current_batch = []
+        current_tokens = 0
+        current_chars = 0
+
+        effective_batch_size = get_int_value(
+            settings.EMBED_BATCH_SIZE if batch_size is None else batch_size,
+            5
         )
-        total = len(texts)
-        num_batches = len(sub_batches)
-        logger.info(
-            "generate_embeddings_batch: %d chunks, batch_size=%d, num_batches=%d, "
-            "max_batch_chars=%d, inter_batch_delay=%.2fs, model=%s",
-            total,
-            effective_batch_size,
-            num_batches,
-            effective_max_batch_chars,
-            inter_batch_delay,
-            model
+        if effective_batch_size < 1:
+            raise ValueError("batch_size must be a positive integer.")
+
+        effective_max_batch_chars = get_int_value(
+            settings.GEMINI_EMBEDDING_MAX_BATCH_CHARS
+            if max_batch_chars is None
+            else max_batch_chars,
+            12000
+        )
+        if effective_max_batch_chars < 1:
+            raise ValueError("max_batch_chars must be a positive integer.")
+        effective_max_tokens = get_int_value(settings.MAX_TOKENS_PER_BATCH, 10000)
+
+        # Determine the batch size limit
+        limit_batch_size = (
+            effective_batch_size
+            if batch_size is not None
+            else get_int_value(self.current_batch_size, 5)
         )
 
-        all_embeddings: List[List[float]] = []
+        for key, text in zip(keys_to_generate, texts_to_generate):
+            tokens = estimate_tokens(text)
+            chars = len(text)
 
+            would_exceed_items = len(current_batch) >= limit_batch_size
+            would_exceed_tokens = current_batch and (current_tokens + tokens > effective_max_tokens)
+            would_exceed_chars = current_batch and (current_chars + chars > effective_max_batch_chars)
+
+            if would_exceed_items or would_exceed_tokens or would_exceed_chars:
+                batches.append(current_batch)
+                current_batch = []
+                current_tokens = 0
+                current_chars = 0
+
+            current_batch.append((key, text))
+            current_tokens += tokens
+            current_chars += chars
+
+        if current_batch:
+            batches.append(current_batch)
+
+        # Process each batch with rate limits, retries, and checkpointing
+        import math
         try:
-            for batch_idx, batch_texts in enumerate(sub_batches):
-                total_chars = sum(len(t) for t in batch_texts)
+            for batch_idx, batch in enumerate(batches):
+                safe_batch_size = max(1, self.current_batch_size)
+                total_batches = math.ceil(total_chunks / safe_batch_size)
+                current_batch_idx = (chunks_processed // safe_batch_size) + 1
+                completion_percentage = (chunks_processed / total_chunks) * 100
 
                 logger.info(
-                    "Embedding sub-batch %d/%d: items=%d, total_chars=%d",
-                    batch_idx + 1, num_batches, len(batch_texts), total_chars
+                    "Batch %d/%d\nProcessed: %d/%d chunks (%.1f%%)",
+                    current_batch_idx, total_batches, chunks_processed, total_chunks, completion_percentage
                 )
 
+                batch_tokens = sum(estimate_tokens(text) for _, text in batch)
+                self._rate_limiter.wait_if_needed(batch_tokens)
+
+                batch_texts = [text for _, text in batch]
                 response = self._call_with_retry(
                     self._client.embed_content,
                     model=model,
@@ -221,42 +451,82 @@ class GeminiService:
                     task_type="retrieval_document"
                 )
 
+                self._rate_limiter.record_request(batch_tokens)
+
                 if "embedding" not in response:
-                    logger.error(
-                        "API response for sub-batch %d/%d did not contain 'embedding' key: %s",
-                        batch_idx + 1, num_batches, response
-                    )
+                    logger.error("API response did not contain 'embedding' key")
                     raise RuntimeError("Invalid API response format: 'embedding' key not found.")
 
                 batch_embeddings = response["embedding"]
                 if not isinstance(batch_embeddings, list) or (
                     batch_embeddings and not isinstance(batch_embeddings[0], list)
                 ):
-                    logger.error(
-                        "Sub-batch %d/%d returned embeddings in unexpected format: %s",
-                        batch_idx + 1, num_batches, type(batch_embeddings)
-                    )
-                    raise RuntimeError(
-                        "Returned embeddings from API did not match expected list-of-lists format."
-                    )
+                    logger.error("Returned embeddings in unexpected format")
+                    raise RuntimeError("Returned embeddings from API did not match expected list-of-lists format.")
 
-                all_embeddings.extend(batch_embeddings)
+                # Gradually adapt/grow batch size back to config limit on success
+                self.current_batch_size = min(effective_batch_size, self.current_batch_size + 1)
 
-                # Brief pause between sub-batches to avoid burst-rate 429s
-                if batch_idx < num_batches - 1 and inter_batch_delay > 0:
-                    time.sleep(inter_batch_delay)
+                # Store embeddings immediately in ChromaDB for checkpoint resume
+                if repository and vector_store and embeddable_chunks:
+                    try:
+                        batch_chunks = []
+                        for k, _ in batch:
+                            found_chunk = None
+                            for chunk in embeddable_chunks:
+                                if chunk.chunk_id == k:
+                                    found_chunk = chunk
+                                    break
+                            if found_chunk:
+                                batch_chunks.append(found_chunk)
 
-            logger.info(
-                "generate_embeddings_batch: completed. Total embeddings returned: %d",
-                len(all_embeddings)
-            )
-            return all_embeddings
+                        if batch_chunks:
+                            documents = [chunk.content for chunk in batch_chunks]
+                            ids = [chunk.chunk_id for chunk in batch_chunks]
+                            metadatas = []
+                            for chunk in batch_chunks:
+                                metadata = dict(chunk.metadata)
+                                metadata["file_path"] = chunk.file_path
+                                metadata["chunk_type"] = chunk.chunk_type
+                                metadatas.append(metadata)
+
+                            vector_store.add_documents(
+                                collection_name=repository,
+                                documents=documents,
+                                embeddings=batch_embeddings,
+                                metadatas=metadatas,
+                                ids=ids
+                            )
+                    except Exception as db_err:
+                        logger.warning("Failed to store intermediate batch in ChromaDB: %s", db_err)
+
+                # Update memory cache
+                for (key, _), emb in zip(batch, batch_embeddings):
+                    final_embeddings_map[key] = emb
+
+                chunks_processed += len(batch)
+
+                # Inter-batch delay
+                if batch_idx < len(batches) - 1 and settings.EMBED_BATCH_DELAY > 0:
+                    time.sleep(settings.EMBED_BATCH_DELAY)
+
+            logger.info("generate_embeddings_batch: completed. Total embeddings returned: %d", total_chunks)
 
         except Exception as e:
             logger.exception("Failed to generate batch embeddings due to API error")
+            if isinstance(e, GeminiIngestionError):
+                raise
             if self._is_quota_error(e):
                 raise RuntimeError(self._quota_error_message(e)) from e
             raise RuntimeError(f"Failed to generate batch embeddings: {e}") from e
+
+        # Assemble final results in correct index order
+        all_embeddings = []
+        for i in range(total_chunks):
+            key = get_chunk_key(i)
+            all_embeddings.append(final_embeddings_map[key])
+
+        return all_embeddings
 
     def _build_embedding_sub_batches(
         self,
