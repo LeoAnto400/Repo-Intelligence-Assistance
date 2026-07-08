@@ -351,8 +351,9 @@ class GeminiService:
                 existing = collection.get(ids=unique_ids, include=["embeddings"])
                 if existing and "ids" in existing:
                     for idx, cid in enumerate(existing["ids"]):
-                        if existing.get("embeddings") and idx < len(existing["embeddings"]) and existing["embeddings"][idx]:
-                            existing_embeddings[cid] = existing["embeddings"][idx]
+                        emb = existing.get("embeddings")
+                        if emb is not None and idx < len(emb) and emb[idx] is not None and len(emb[idx]) > 0:
+                            existing_embeddings[cid] = emb[idx]
             except Exception as e:
                 logger.warning("Failed to check existing embeddings in ChromaDB: %s. Re-embedding all.", e)
 

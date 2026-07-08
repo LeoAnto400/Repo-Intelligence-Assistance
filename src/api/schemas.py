@@ -1,4 +1,4 @@
-from typing import List
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
@@ -12,6 +12,7 @@ class IngestResponse(BaseModel):
     repository: str
     files_processed: int
     chunks_created: int
+    repo_url: Optional[str] = None
 
 class QueryRequest(BaseModel):
     """Payload to run a query against a previously ingested repository."""
@@ -22,3 +23,12 @@ class QueryResponse(BaseModel):
     answer: str
     source_files: List[str]
     retrieved_chunks: int
+
+class RepositoryContextResponse(BaseModel):
+    """Repository metadata and source snapshot for the active ingested repository."""
+    repository: str
+    repo_url: str
+    metadata: Dict[str, Any]
+    files: List[Dict[str, Any]]
+    commits: List[Dict[str, Any]]
+    pull_requests: List[Dict[str, Any]]

@@ -1,11 +1,11 @@
 import os
 import shutil
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, ANY
 import subprocess
 from pathlib import Path
 
-from src.services.github import GitHubService
+from src.services.github import GitHubService, github_network_env
 
 class TestGitHubService(unittest.TestCase):
     def setUp(self):
@@ -31,7 +31,8 @@ class TestGitHubService(unittest.TestCase):
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True
+            text=True,
+            env=ANY,
         )
         self.assertEqual(result_path, os.path.abspath("dummy_temp_dir"))
 
@@ -50,8 +51,21 @@ class TestGitHubService(unittest.TestCase):
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True
+            text=True,
+            env=ANY,
         )
+
+    @patch.dict(os.environ, {
+        "HTTP_PROXY": "http://127.0.0.1:9",
+        "HTTPS_PROXY": "http://localhost:9",
+        "ALL_PROXY": "http://proxy.example.com:8080",
+    }, clear=False)
+    def test_github_network_env_removes_only_dead_local_proxy(self):
+        env = github_network_env()
+
+        self.assertNotIn("HTTP_PROXY", env)
+        self.assertNotIn("HTTPS_PROXY", env)
+        self.assertEqual(env["ALL_PROXY"], "http://proxy.example.com:8080")
 
     def test_clone_repository_empty_url(self):
         with self.assertRaises(ValueError) as context:

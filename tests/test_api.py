@@ -20,11 +20,13 @@ class TestApi(unittest.TestCase):
         routes.get_analysis_agent.cache_clear()
         routes.get_orchestrator.cache_clear()
         routes._active_repository = None
+        routes._active_repository_context = None
         self.client = TestClient(app)
 
     def tearDown(self):
         app.dependency_overrides.clear()
         routes._active_repository = None
+        routes._active_repository_context = None
 
     def test_health_endpoint(self):
         response = self.client.get("/health")
@@ -41,6 +43,24 @@ class TestApi(unittest.TestCase):
                 "language": "Python",
             }
         ]
+        github_service.fetch_repository_context.return_value = {
+            "metadata": {
+                "name": "demo",
+                "owner": "example",
+                "stars": 0,
+                "forks": 0,
+                "primary_language": "Python",
+                "license": None,
+                "default_branch": "main",
+                "latest_commit": "Initial commit",
+                "size_kb": 1,
+                "visibility": "public",
+                "contributors": [],
+            },
+            "files": github_service.fetch_repo_files.return_value,
+            "commits": [],
+            "pull_requests": [],
+        }
         chunk = Chunk(
             chunk_id="chunk-1",
             file_path="src/auth.py",
@@ -70,14 +90,30 @@ class TestApi(unittest.TestCase):
             "repository": "demo",
             "files_processed": 1,
             "chunks_created": 1,
+            "repo_url": "https://github.com/example/demo",
         })
         github_service.fetch_repo_files.assert_called_once_with("https://github.com/example/demo")
+        github_service.fetch_repository_context.assert_called_once_with(
+            "https://github.com/example/demo",
+            files=github_service.fetch_repo_files.return_value,
+        )
         gemini_service.generate_embeddings_batch.assert_called_once_with([
             "def login():\n    return True"
         ])
         vector_store.reset_collection.assert_called_once_with("demo")
         vector_store.add_documents.assert_called_once()
         self.assertEqual(routes.get_active_repository(), "demo")
+
+        context_response = self.client.get("/api/v1/repository")
+        self.assertEqual(context_response.status_code, 200)
+        self.assertEqual(context_response.json()["repository"], "demo")
+        self.assertEqual(context_response.json()["metadata"]["name"], "demo")
+
+    def test_repository_endpoint_requires_ingestion(self):
+        response = self.client.get("/api/v1/repository")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("No repository has been ingested", response.json()["detail"])
 
     def test_ingest_endpoint_rejects_invalid_url(self):
         response = self.client.post(

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ChatMessage } from '../../services/mockChat'
-import { sendMessageMock } from '../../services/mockChat'
+import { sendMessage } from '../../services/api'
 import MessageItem from './MessageItem'
 import ChatInput from './ChatInput'
 
@@ -11,7 +11,7 @@ export function ChatWindow() {
   const containerRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
-    // load saved history or fall back to welcome
+    // load saved history or fall back to welcome message
     try {
       const raw = localStorage.getItem('repo_chat_history')
       if (raw) {
@@ -19,12 +19,17 @@ export function ChatWindow() {
         setMessages(parsed)
         return
       }
-    } catch (e) {
-      // ignore
+    } catch {
+      // ignore parse errors
     }
 
     setMessages([
-      { id: 'sys-1', role: 'assistant', content: 'Hello! I am your repository assistant. Ask me anything.', created_at: new Date().toISOString() },
+      {
+        id: 'sys-1',
+        role: 'assistant',
+        content: 'Hello! I am your repository assistant. Ingest a repository on the Home page, then ask me anything about the code.',
+        created_at: new Date().toISOString(),
+      },
     ])
   }, [])
 
@@ -35,31 +40,53 @@ export function ChatWindow() {
     c.scrollTo({ top: c.scrollHeight, behavior: 'smooth' })
   }, [messages, typing])
 
+  useEffect(() => {
+    // persist messages to localStorage
+    try {
+      localStorage.setItem('repo_chat_history', JSON.stringify(messages))
+    } catch {
+      // ignore storage errors
+    }
+  }, [messages])
+
   async function handleSend(text: string) {
-    const userMsg: ChatMessage = { id: `u-${Date.now()}`, role: 'user', content: text, created_at: new Date().toISOString() }
-    setMessages((m) => {
-      const next = [...m, userMsg]
-      try { localStorage.setItem('repo_chat_history', JSON.stringify(next)) } catch {}
-      return next
-    })
+    const userMsg: ChatMessage = {
+      id: `u-${Date.now()}`,
+      role: 'user',
+      content: text,
+      created_at: new Date().toISOString(),
+    }
+    setMessages((m) => [...m, userMsg])
     setLoading(true)
     setTyping(true)
 
-    // simulate assistant typing then respond
-    const resp = await sendMessageMock(text)
-    setTyping(false)
-    setMessages((m) => {
-      const next = [...m, resp]
-      try { localStorage.setItem('repo_chat_history', JSON.stringify(next)) } catch {}
-      return next
-    })
-    setLoading(false)
-  }
+    try {
+      const data = await sendMessage(text)
+      setTyping(false)
 
-  useEffect(() => {
-    // ensure messages persist on changes as well
-    try { localStorage.setItem('repo_chat_history', JSON.stringify(messages)) } catch {}
-  }, [messages])
+      const assistantMsg: ChatMessage = {
+        id: `a-${Date.now()}`,
+        role: 'assistant',
+        content: data.answer || '(No answer returned)',
+        created_at: new Date().toISOString(),
+        sources: data.source_files.map((path) => ({ path })),
+        chunk_count: data.retrieved_chunks,
+      }
+      setMessages((m) => [...m, assistantMsg])
+    } catch (err: unknown) {
+      setTyping(false)
+      const message = err instanceof Error ? err.message : 'An unexpected error occurred.'
+      const errorMsg: ChatMessage = {
+        id: `err-${Date.now()}`,
+        role: 'assistant',
+        content: `⚠️ ${message}`,
+        created_at: new Date().toISOString(),
+      }
+      setMessages((m) => [...m, errorMsg])
+    } finally {
+      setLoading(false)
+    }
+  }
 
   return (
     <div className="flex h-[70vh] max-h-[80vh] w-full flex-col">
@@ -75,7 +102,9 @@ export function ChatWindow() {
         {typing && (
           <div className="mt-2 flex items-center gap-2">
             <div className="h-8 w-8 rounded-full bg-slate-100 dark:bg-slate-800" />
-            <div className="text-sm text-slate-500">Assistant is typing<span className="animate-pulse">…</span></div>
+            <div className="text-sm text-slate-500">
+              Assistant is thinking<span className="animate-pulse">…</span>
+            </div>
           </div>
         )}
       </div>

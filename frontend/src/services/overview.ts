@@ -11,19 +11,35 @@ export type RepositoryOverview = {
   build_tool: string
 }
 
-export async function fetchRepositoryOverview() {
-  const res = await fetch('/query', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question: 'Provide a repository overview with summary, purpose, architecture, technologies, folder structure, main modules, entry point, authentication, database, and build tool.' }),
-  })
+/**
+ * Generates a repository overview by querying the RAG backend.
+ * Returns null if no repository has been ingested yet (404/400/500 from backend).
+ */
+export async function fetchRepositoryOverview(): Promise<RepositoryOverview | null> {
+  let res: Response
+  try {
+    res = await fetch('/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question:
+          'Provide a repository overview with summary, purpose, architecture, technologies, folder structure, main modules, entry point, authentication, database, and build tool.',
+      }),
+    })
+  } catch {
+    // Network error — backend not reachable
+    return null
+  }
 
+  // 400 / 404 / 500 all mean "no repo ingested yet" — return null gracefully
   if (!res.ok) {
-    throw new Error(`Overview request failed: ${res.status}`)
+    return null
   }
 
   const data = await res.json()
-  const answer = data.answer || ''
+  const answer: string = data.answer || ''
+
+  if (!answer.trim()) return null
 
   return {
     summary: extractField(answer, 'Repository Summary') || answer,
@@ -40,7 +56,7 @@ export async function fetchRepositoryOverview() {
 }
 
 function extractField(text: string, label: string) {
-  const regex = new RegExp(`${label}:?\\s*([\s\S]*?)(?:\\n\\n|$)`, 'i')
+  const regex = new RegExp(`${label}:?\\s*([\\s\\S]*?)(?:\\n\\n|$)`, 'i')
   const match = text.match(regex)
   return match?.[1]?.trim() ?? ''
 }
@@ -48,5 +64,8 @@ function extractField(text: string, label: string) {
 function extractList(text: string, label: string) {
   const field = extractField(text, label)
   if (!field) return []
-  return field.split(/\n|,|;/).map((item) => item.replace(/^[-*\s]+/, '').trim()).filter(Boolean)
+  return field
+    .split(/\n|,|;/)
+    .map((item) => item.replace(/^[-*\s]+/, '').trim())
+    .filter(Boolean)
 }

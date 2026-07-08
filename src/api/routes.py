@@ -9,7 +9,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from src.agents.analysis import AnalysisAgent
 from src.agents.orchestrator import Orchestrator
 from src.agents.retrieval import RetrievalAgent
-from src.api.schemas import IngestRequest, IngestResponse, QueryRequest, QueryResponse
+from src.api.schemas import (
+    IngestRequest,
+    IngestResponse,
+    QueryRequest,
+    QueryResponse,
+    RepositoryContextResponse,
+)
 from src.core.config import settings
 from src.db.chroma import VectorStoreManager
 from src.services.chunker import CodeChunker, CodeFile
@@ -21,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 _active_repository: Optional[str] = None
+_active_repository_context: Optional[Dict[str, Any]] = None
 
 
 def collection_name_from_repo_url(repo_url: str) -> str:
@@ -47,6 +54,15 @@ def set_active_repository(repository: str) -> None:
 
 def get_active_repository() -> Optional[str]:
     return _active_repository
+
+
+def set_active_repository_context(context: Dict[str, Any]) -> None:
+    global _active_repository_context
+    _active_repository_context = context
+
+
+def get_active_repository_context() -> Optional[Dict[str, Any]]:
+    return _active_repository_context
 
 
 @lru_cache(maxsize=1)
@@ -206,7 +222,23 @@ async def ingest_repository(
             detail=f"ChromaDB storage failed: {e}",
         ) from e
 
+    try:
+        repository_context = github_service.fetch_repository_context(repo_url, files=files)
+    except Exception as e:
+        logger.exception("GitHub repository metadata fetch failed during ingestion")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"GitHub repository metadata fetch failed: {e}",
+        ) from e
+
     set_active_repository(repository)
+    set_active_repository_context(
+        {
+            "repository": repository,
+            "repo_url": repo_url,
+            **repository_context,
+        }
+    )
     logger.info(
         "Ingestion complete",
         extra={
@@ -220,7 +252,20 @@ async def ingest_repository(
         repository=repository,
         files_processed=len(files),
         chunks_created=len(embeddable_chunks),
+        repo_url=repo_url,
     )
+
+
+@router.get("/repository", response_model=RepositoryContextResponse)
+async def get_repository_context() -> RepositoryContextResponse:
+    context = get_active_repository_context()
+    if not context:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No repository has been ingested yet.",
+        )
+
+    return RepositoryContextResponse(**context)
 
 
 @router.post("/query", response_model=QueryResponse)

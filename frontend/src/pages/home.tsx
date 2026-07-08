@@ -5,6 +5,13 @@ import { Input } from '../components/ui/input'
 import { Spinner } from '../components/ui/spinner'
 import { ingestRepository } from '../services/api'
 
+const STAGES = [
+  { label: 'Cloning repository…', minMs: 0 },
+  { label: 'Chunking source files…', minMs: 4000 },
+  { label: 'Generating embeddings…', minMs: 10000 },
+  { label: 'Indexing into vector store…', minMs: 20000 },
+]
+
 export function HomePage() {
   const [url, setUrl] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -12,19 +19,45 @@ export function HomePage() {
   const [success, setSuccess] = useState(false)
   const [currentStageIndex, setCurrentStageIndex] = useState<number>(-1)
   const abortRef = useRef<AbortController | null>(null)
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const startTimeRef = useRef<number>(0)
   const navigate = useNavigate()
 
   useEffect(() => {
     return () => {
       abortRef.current?.abort()
+      if (timerRef.current) clearInterval(timerRef.current)
     }
   }, [])
 
   function validateRepo(u: string) {
     if (!u) return 'Please enter a GitHub repository URL.'
-    // Basic GitHub repo URL validation: https://github.com/owner/repo
     const re = /^https?:\/\/(www\.)?github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/
     return re.test(u) ? null : 'Please enter a valid GitHub repository URL (e.g. https://github.com/owner/repo).'
+  }
+
+  function startProgressTimer() {
+    startTimeRef.current = Date.now()
+    setCurrentStageIndex(0)
+
+    timerRef.current = setInterval(() => {
+      const elapsed = Date.now() - startTimeRef.current
+      let newStage = 0
+      for (let i = STAGES.length - 1; i >= 0; i--) {
+        if (elapsed >= STAGES[i].minMs) {
+          newStage = i
+          break
+        }
+      }
+      setCurrentStageIndex(newStage)
+    }, 500)
+  }
+
+  function stopProgressTimer() {
+    if (timerRef.current) {
+      clearInterval(timerRef.current)
+      timerRef.current = null
+    }
   }
 
   function onAnalyze(e?: React.FormEvent) {
@@ -38,41 +71,28 @@ export function HomePage() {
 
     setError(null)
     setLoading(true)
-    setCurrentStageIndex(0)
+    startProgressTimer()
 
     const controller = new AbortController()
     abortRef.current = controller
 
-    ingestRepository(
-      url.trim(),
-      (p) => {
-        const s = (p.stage || '').toLowerCase()
-        if (s.includes('clone')) setCurrentStageIndex(0)
-        else if (s.includes('chunk')) setCurrentStageIndex(1)
-        else if (s.includes('embed') || s.includes('embedding')) setCurrentStageIndex(2)
-        else if (s.includes('index')) setCurrentStageIndex(3)
-      },
-      controller.signal,
-    )
+    ingestRepository(url.trim(), controller.signal)
       .then(() => {
+        stopProgressTimer()
+        setCurrentStageIndex(STAGES.length - 1)
         setLoading(false)
         setSuccess(true)
-        // small delay to show completion
-        setTimeout(() => navigate('/repository'), 600)
+        setTimeout(() => navigate('/repository'), 700)
       })
-      .catch((err) => {
-        if (err.name === 'AbortError') return
+      .catch((err: unknown) => {
+        if (err instanceof Error && err.name === 'AbortError') return
+        stopProgressTimer()
+        setCurrentStageIndex(-1)
         setLoading(false)
-        setError(err.message || 'Ingestion failed. Please try again.')
+        const msg = err instanceof Error ? err.message : 'Ingestion failed. Please try again.'
+        setError(msg)
       })
   }
-
-  const stages = [
-    'Cloning repository...',
-    'Chunking...',
-    'Generating embeddings...',
-    'Indexing...',
-  ]
 
   return (
     <div className="flex w-full flex-1 items-center justify-center">
@@ -108,7 +128,7 @@ export function HomePage() {
                 {loading ? (
                   <span className="flex items-center gap-2">
                     <Spinner className="h-4 w-4" />
-                    Ingesting...
+                    Ingesting…
                   </span>
                 ) : (
                   'Analyze Repository'
@@ -122,25 +142,37 @@ export function HomePage() {
               </p>
             )}
 
-            <div className="mt-6 grid gap-2">
-              {stages.map((s, i) => (
-                <div
-                  key={s}
-                  className={`flex items-center gap-3 rounded-md px-3 py-2 text-sm ${
-                    i === currentStageIndex
-                      ? 'bg-indigo-50 text-indigo-800 dark:bg-indigo-900/40 dark:text-indigo-300'
-                      : 'bg-transparent text-slate-500'
-                  }`}
-                >
-                  <span className="w-4">{i === currentStageIndex ? <Spinner className="h-4 w-4" /> : '·'}</span>
-                  <span>{s}</span>
-                </div>
-              ))}
-            </div>
+            {loading && (
+              <div className="mt-6 grid gap-2">
+                {STAGES.map((s, i) => (
+                  <div
+                    key={s.label}
+                    className={`flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors ${
+                      i === currentStageIndex
+                        ? 'bg-indigo-50 text-indigo-800 dark:bg-indigo-900/40 dark:text-indigo-300'
+                        : i < currentStageIndex
+                        ? 'text-emerald-600 dark:text-emerald-400'
+                        : 'bg-transparent text-slate-400'
+                    }`}
+                  >
+                    <span className="w-4 shrink-0">
+                      {i === currentStageIndex ? (
+                        <Spinner className="h-4 w-4" />
+                      ) : i < currentStageIndex ? (
+                        '✓'
+                      ) : (
+                        '·'
+                      )}
+                    </span>
+                    <span>{s.label}</span>
+                  </div>
+                ))}
+              </div>
+            )}
 
             {success && !loading && (
-              <div className="mt-3 rounded-md bg-emerald-50 px-4 py-2 text-sm text-emerald-700">
-                Repository ingested. Redirecting to repository view...
+              <div className="mt-3 rounded-md bg-emerald-50 px-4 py-2 text-sm text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">
+                ✓ Repository ingested successfully. Redirecting…
               </div>
             )}
           </form>

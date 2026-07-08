@@ -5,7 +5,7 @@ import { Spinner } from '../ui/spinner'
 export function RepositoryOverviewPanel() {
   const [overview, setOverview] = useState<RepositoryOverview | null>(null)
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
+  const [unavailable, setUnavailable] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -13,11 +13,15 @@ export function RepositoryOverviewPanel() {
     fetchRepositoryOverview()
       .then((data) => {
         if (!active) return
-        setOverview(data)
+        if (data) {
+          setOverview(data)
+        } else {
+          setUnavailable(true)
+        }
       })
-      .catch((err) => {
+      .catch(() => {
         if (!active) return
-        setError(err.message || 'Unable to load overview')
+        setUnavailable(true)
       })
       .finally(() => {
         if (!active) return
@@ -27,6 +31,7 @@ export function RepositoryOverviewPanel() {
       active = false
     }
   }, [])
+
 
   if (loading) {
     return (
@@ -39,17 +44,18 @@ export function RepositoryOverviewPanel() {
     )
   }
 
-  if (error) {
+  if (unavailable || !overview) {
+    if (loading) return null
     return (
-      <div className="rounded-2xl border border-rose-200/70 bg-rose-50/80 p-6 text-rose-700 shadow-sm dark:border-rose-800/70 dark:bg-rose-900/40 dark:text-rose-100">
-        <p className="font-medium">Overview load failed</p>
-        <p className="mt-2 text-sm">{error}</p>
+      <div className="rounded-2xl border border-slate-200/70 bg-white/80 p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900/60">
+        <div className="mb-3">
+          <h2 className="text-lg font-semibold">Repository Overview</h2>
+        </div>
+        <p className="text-sm text-slate-500 dark:text-slate-400">
+          Overview will be generated once a repository is ingested. Ask a question in the Chat tab to trigger it.
+        </p>
       </div>
     )
-  }
-
-  if (!overview) {
-    return null
   }
 
   return (

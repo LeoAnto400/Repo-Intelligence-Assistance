@@ -1,12 +1,13 @@
-import { useMemo, useState } from 'react'
-import { useLocation } from 'react-router-dom'
-import { mockRepo } from '../services/mockRepository'
+import { useEffect, useMemo, useState } from 'react'
+import { Link, useLocation } from 'react-router-dom'
+import type { RepoDetails } from '../services/mockRepository'
 import CommitsPanel from '../components/commits/CommitsPanel'
 import PullsPanel from '../components/pulls/PullsPanel'
 import FileExplorer from '../components/files/FileExplorer'
 import CodeViewer from '../components/files/CodeViewer'
 import RepositoryOverviewPanel from '../components/overview/RepositoryOverviewPanel'
-import { mockFileTree, type FileNode } from '../services/mockFiles'
+import type { FileNode } from '../services/mockFiles'
+import { fetchRepositoryContext, filesToTree } from '../services/repositoryData'
 
 function findFileByQuery(nodes: FileNode[], fileQuery: string): FileNode | null {
   const normalized = fileQuery.replace(/^\/+/, '').toLowerCase()
@@ -24,17 +25,56 @@ function findFileByQuery(nodes: FileNode[], fileQuery: string): FileNode | null 
   return null
 }
 
+function findFirstFile(nodes: FileNode[]): FileNode | null {
+  for (const node of nodes) {
+    if (node.type === 'file') return node
+    if (node.children) {
+      const found = findFirstFile(node.children)
+      if (found) return found
+    }
+  }
+  return null
+}
+
 export function RepositoryPage() {
-  const repo = mockRepo
   const location = useLocation()
+  const [repo, setRepo] = useState<RepoDetails | null>(null)
+  const [fileTree, setFileTree] = useState<FileNode[]>([])
   const [selectedFile, setSelectedFile] = useState<FileNode | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let mounted = true
+    setLoading(true)
+    fetchRepositoryContext()
+      .then((context) => {
+        if (!mounted) return
+        const tree = filesToTree(context.files)
+        setRepo(context.metadata)
+        setFileTree(tree)
+        setSelectedFile(findFirstFile(tree))
+        setError(null)
+      })
+      .catch((err) => {
+        if (!mounted) return
+        setError(err.message || 'Unable to load repository details.')
+      })
+      .finally(() => {
+        if (mounted) setLoading(false)
+      })
+
+    return () => {
+      mounted = false
+    }
+  }, [])
 
   const { selectedNode, highlightLines } = useMemo(() => {
     const params = new URLSearchParams(location.search)
     const fileQuery = params.get('file')
     const line = params.get('line')
     const end = params.get('end')
-    const selected = fileQuery ? findFileByQuery(mockFileTree, fileQuery) : selectedFile
+    const selected = fileQuery ? findFileByQuery(fileTree, fileQuery) : selectedFile
     const lines: number[] = []
     if (selected && line) {
       const startLine = Number(line)
@@ -44,7 +84,27 @@ export function RepositoryPage() {
       }
     }
     return { selectedNode: selected, highlightLines: lines }
-  }, [location.search, selectedFile])
+  }, [fileTree, location.search, selectedFile])
+
+  if (loading) {
+    return (
+      <div className="mx-auto max-w-3xl px-4 py-16 text-center text-sm text-slate-500">
+        Loading repository details...
+      </div>
+    )
+  }
+
+  if (error || !repo) {
+    return (
+      <div className="mx-auto max-w-3xl px-4 py-16 text-center">
+        <h1 className="text-2xl font-semibold">No repository loaded</h1>
+        <p className="mt-3 text-sm text-slate-500">{error || 'Ingest a GitHub repository first.'}</p>
+        <Link className="mt-6 inline-flex rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white dark:bg-slate-100 dark:text-slate-950" to="/">
+          Analyze a repository
+        </Link>
+      </div>
+    )
+  }
 
   return (
     <div className="w-full">
@@ -79,7 +139,7 @@ export function RepositoryPage() {
         </div>
 
         <div className="grid grid-cols-1 gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
-          <FileExplorer files={mockFileTree} selectedPath={selectedNode?.path || null} onSelect={setSelectedFile} />
+          <FileExplorer files={fileTree} selectedPath={selectedNode?.path || null} onSelect={setSelectedFile} />
 
           <div className="space-y-6">
             <RepositoryOverviewPanel />

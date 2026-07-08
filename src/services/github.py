@@ -3,8 +3,13 @@ import os
 import shutil
 import subprocess
 import tempfile
+from contextlib import contextmanager
+from itertools import islice
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
+from urllib.parse import urlparse
+
+from github import Github, GithubException
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +47,42 @@ IGNORE_DIRS = {
     "__pycache__"
 }
 
+PROXY_ENV_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+
+
+def is_dead_local_proxy(value: Optional[str]) -> bool:
+    """Return True for the blocked proxy value inherited by some local/sandbox shells."""
+    if not value:
+        return False
+
+    parsed = urlparse(value)
+    return parsed.hostname in {"127.0.0.1", "localhost"} and parsed.port == 9
+
+
+def github_network_env() -> Dict[str, str]:
+    """Build an environment for GitHub network calls without inherited dead local proxies."""
+    env = os.environ.copy()
+    for key in PROXY_ENV_VARS:
+        if is_dead_local_proxy(env.get(key)):
+            env.pop(key, None)
+    return env
+
+
+@contextmanager
+def without_dead_local_proxy() -> Iterator[None]:
+    """Temporarily remove dead local proxy variables for libraries that read os.environ."""
+    removed: Dict[str, str] = {}
+    for key in PROXY_ENV_VARS:
+        value = os.environ.get(key)
+        if is_dead_local_proxy(value):
+            removed[key] = value
+            os.environ.pop(key, None)
+
+    try:
+        yield
+    finally:
+        os.environ.update(removed)
+
 def safe_rmtree(path: str) -> None:
     """
     Safely remove directory tree, handling Windows read-only file permission issues (e.g. from .git).
@@ -75,6 +116,130 @@ class GitHubService:
             token: GitHub personal access token (optional).
         """
         self.token = token
+
+    def parse_repo_url(self, repo_url: str) -> tuple[str, str]:
+        """Extract GitHub owner and repository name from an HTTPS repo URL."""
+        parsed = urlparse(repo_url.strip())
+        path_parts = [part for part in parsed.path.strip("/").split("/") if part]
+        if parsed.netloc.lower() not in {"github.com", "www.github.com"} or len(path_parts) < 2:
+            raise ValueError("Expected a GitHub repository URL like https://github.com/owner/repo.")
+
+        owner = path_parts[0]
+        repo_name = path_parts[1]
+        if repo_name.endswith(".git"):
+            repo_name = repo_name[:-4]
+        return owner, repo_name
+
+    def fetch_repository_context(
+        self,
+        repo_url: str,
+        files: Optional[List[Dict[str, Any]]] = None,
+        commit_limit: int = 50,
+        pull_limit: int = 50,
+        contributor_limit: int = 10,
+    ) -> Dict[str, Any]:
+        """
+        Fetch repository metadata, commits, pull requests, and the current source snapshot.
+        The file list can be supplied from ingestion to avoid cloning the repository twice.
+        """
+        owner, repo_name = self.parse_repo_url(repo_url)
+        try:
+            with without_dead_local_proxy():
+                github_client = Github(self.token) if self.token else Github()
+                repo = github_client.get_repo(f"{owner}/{repo_name}")
+                license_name = repo.license.name if repo.license else None
+                contributors = [
+                    {"login": contributor.login, "contributions": contributor.contributions}
+                    for contributor in islice(repo.get_contributors(), contributor_limit)
+                ]
+                commits = [
+                    self._commit_to_dict(commit, repo.default_branch)
+                    for commit in islice(repo.get_commits(), commit_limit)
+                ]
+                try:
+                    pull_requests = [
+                        self._pull_request_to_dict(pr)
+                        for pr in islice(repo.get_pulls(state="all", sort="updated", direction="desc"), pull_limit)
+                    ]
+                except GithubException as pr_exc:
+                    logger.warning(
+                        "Could not fetch pull requests for %s/%s (status %s): %s. Skipping PRs.",
+                        owner,
+                        repo_name,
+                        getattr(pr_exc, "status", "?"),
+                        pr_exc.data.get("message", str(pr_exc)) if pr_exc.data else str(pr_exc),
+                    )
+                    pull_requests = []
+
+                return {
+                    "metadata": {
+                        "name": repo.name,
+                        "full_name": repo.full_name,
+                        "description": repo.description,
+                        "owner": repo.owner.login,
+                        "stars": repo.stargazers_count,
+                        "forks": repo.forks_count,
+                        "primary_language": repo.language,
+                        "license": license_name,
+                        "default_branch": repo.default_branch,
+                        "latest_commit": commits[0]["message"] if commits else None,
+                        "size_kb": repo.size,
+                        "visibility": "private" if repo.private else "public",
+                        "open_issues": repo.open_issues_count,
+                        "contributors": contributors,
+                        "html_url": repo.html_url,
+                    },
+                    "files": files or self.fetch_repo_files(repo_url),
+                    "commits": commits,
+                    "pull_requests": pull_requests,
+                }
+        except GithubException as e:
+            logger.exception("GitHub API request failed for %s/%s", owner, repo_name)
+            raise RuntimeError(f"GitHub API request failed: {e.data.get('message', str(e)) if e.data else e}") from e
+
+    def _commit_to_dict(self, commit: Any, default_branch: str) -> Dict[str, Any]:
+        stats = getattr(commit, "stats", None)
+        raw_files = getattr(commit, "files", None)
+        files = list(raw_files) if raw_files is not None else []
+        diff_lines: List[str] = []
+        for changed_file in files[:5]:
+            patch = getattr(changed_file, "patch", None)
+            if patch:
+                diff_lines.append(f"--- {changed_file.filename}\n{patch}")
+
+        return {
+            "hash": commit.sha,
+            "author": (
+                commit.author.login
+                if commit.author
+                else commit.commit.author.name
+                if commit.commit and commit.commit.author
+                else "unknown"
+            ),
+            "message": commit.commit.message if commit.commit else "",
+            "time": commit.commit.author.date.isoformat() if commit.commit and commit.commit.author else "",
+            "branch": default_branch,
+            "filesChanged": len(files),
+            "additions": stats.additions if stats else 0,
+            "deletions": stats.deletions if stats else 0,
+            "diff": "\n\n".join(diff_lines),
+        }
+
+    def _pull_request_to_dict(self, pr: Any) -> Dict[str, Any]:
+        status = "merged" if pr.merged else pr.state
+        return {
+            "id": pr.id,
+            "number": pr.number,
+            "title": pr.title,
+            "author": pr.user.login if pr.user else "unknown",
+            "status": status,
+            "labels": [label.name for label in pr.labels],
+            "merge_date": pr.merged_at.isoformat() if pr.merged_at else None,
+            "reviewers": [reviewer.login for reviewer in pr.requested_reviewers],
+            "created_at": pr.created_at.isoformat() if pr.created_at else "",
+            "updated_at": pr.updated_at.isoformat() if pr.updated_at else "",
+            "body": pr.body or "",
+        }
 
     def clone_repository(self, repo_url: str) -> str:
         """
@@ -129,7 +294,8 @@ class GitHubService:
                 check=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                env=github_network_env(),
             )
             logger.info("Successfully cloned repository to %s", temp_dir)
             return os.path.abspath(temp_dir)
@@ -243,4 +409,3 @@ class GitHubService:
             start += chunk_size - chunk_overlap
 
         return chunks
-
