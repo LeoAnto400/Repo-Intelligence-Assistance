@@ -73,30 +73,95 @@ class CodeChunker:
                 )
                 chunks = [self._create_file_chunk(code_file, "file")]
         else:
-            # Fall back to file-level chunk for other/unsupported languages
-            chunks = [self._create_file_chunk(code_file, "file")]
+            # Use sliding-window chunking for non-Python files so large files
+            # are split into manageable, overlapping chunks rather than stored
+            # as a single monolithic blob that dilutes the embedding signal.
+            chunks = self._chunk_generic_file(code_file)
 
         return self._finalize_chunks(chunks, code_file.file_path)
 
+    @staticmethod
+    def _add_file_header(file_path: str, content: str) -> str:
+        """Prepend a file-path comment to chunk content.
+
+        This embeds file-location semantics directly into the chunk text so
+        that queries mentioning a file name can retrieve the correct chunks
+        even when the code body itself does not repeat the filename.
+        """
+        return f"# File: {file_path}\n{content}"
+
     def _create_file_chunk(self, code_file: CodeFile, chunk_type: str) -> Chunk:
         """Helper to create a standard file-level chunk."""
-        chunk_id = self._generate_chunk_id(code_file.file_path, chunk_type, code_file.content)
-        
+        content_with_header = self._add_file_header(code_file.file_path, code_file.content)
+        chunk_id = self._generate_chunk_id(code_file.file_path, chunk_type, content_with_header)
+
         # Merge original metadata with any extra chunk metadata
         merged_metadata = dict(code_file.metadata)
         merged_metadata.update({
             "chunk_type": chunk_type,
             "start_line": 1,
-            "end_line": len(code_file.content.splitlines()) if code_file.content else 1
+            "end_line": len(code_file.content.splitlines()) if code_file.content else 1,
         })
-        
+
         return Chunk(
             chunk_id=chunk_id,
             file_path=code_file.file_path,
-            content=code_file.content,
+            content=content_with_header,
             chunk_type=chunk_type,
-            metadata=merged_metadata
+            metadata=merged_metadata,
         )
+
+    def _chunk_generic_file(self, code_file: CodeFile) -> List[Chunk]:
+        """Sliding-window chunking for non-Python (and non-AST-parseable) files.
+
+        Instead of emitting one huge chunk per file, this method applies the
+        same character-level split-with-overlap strategy used by
+        ``_split_oversized_chunk`` so every window produces a focused embedding.
+        """
+        content_with_header = self._add_file_header(code_file.file_path, code_file.content)
+
+        # If the whole file fits in one chunk, emit a single file chunk.
+        if len(content_with_header) <= self.max_chunk_chars:
+            return [self._create_file_chunk(code_file, "file")]
+
+        lines = code_file.content.splitlines()
+        total_lines = len(lines)
+        sub_texts = self._split_text_with_overlap(code_file.content)
+        total_parts = len(sub_texts)
+        chunks: List[Chunk] = []
+
+        char_offset = 0
+        for index, sub_text in enumerate(sub_texts, start=1):
+            start_line = code_file.content[:char_offset].count("\n") + 1
+            end_line = min(start_line + sub_text.count("\n"), total_lines)
+
+            sub_with_header = self._add_file_header(code_file.file_path, sub_text)
+            suffix = f"part:{index}/{total_parts}"
+            chunk_id = self._generate_chunk_id(
+                code_file.file_path, "file", sub_with_header, suffix=suffix
+            )
+
+            merged_metadata = dict(code_file.metadata)
+            merged_metadata.update({
+                "chunk_type": "file",
+                "start_line": start_line,
+                "end_line": end_line,
+                "chunk_part": index,
+                "chunk_parts": total_parts,
+            })
+
+            chunks.append(Chunk(
+                chunk_id=chunk_id,
+                file_path=code_file.file_path,
+                content=sub_with_header,
+                chunk_type="file",
+                metadata=merged_metadata,
+            ))
+
+            # Advance offset accounting for overlap on the next window
+            char_offset = max(char_offset + len(sub_text) - self.overlap_chars, 0)
+
+        return chunks
 
     def _generate_chunk_id(
         self,
@@ -278,26 +343,27 @@ class CodeChunker:
                 node_lines = lines[start_line - 1 : end_line]
                 node_content = "\n".join(node_lines)
 
-
                 chunk_type = "class" if isinstance(node, ast.ClassDef) else "function"
-                
-                chunk_id = self._generate_chunk_id(code_file.file_path, chunk_type, node_content)
-                
+
+                # Prepend file-path header so the embedding carries location context.
+                content_with_header = self._add_file_header(code_file.file_path, node_content)
+                chunk_id = self._generate_chunk_id(code_file.file_path, chunk_type, content_with_header)
+
                 # Merge metadata
                 merged_metadata = dict(code_file.metadata)
                 merged_metadata.update({
                     "name": node.name,
                     "chunk_type": chunk_type,
                     "start_line": start_line,
-                    "end_line": end_line
+                    "end_line": end_line,
                 })
-                
+
                 chunks.append(Chunk(
                     chunk_id=chunk_id,
                     file_path=code_file.file_path,
-                    content=node_content,
+                    content=content_with_header,
                     chunk_type=chunk_type,
-                    metadata=merged_metadata
+                    metadata=merged_metadata,
                 ))
 
         # If no classes or functions were found in Python code, fall back to file-level chunk

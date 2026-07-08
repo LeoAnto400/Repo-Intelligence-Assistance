@@ -37,16 +37,24 @@ class VectorStoreManager:
     def get_collection(self, collection_name: str) -> Collection:
         """
         Get or create a Chroma collection by name.
-        
+
+        The collection is always created with cosine similarity as the distance
+        metric (``hnsw:space = "cosine"``).  Gemini embeddings are unit-
+        normalised, so cosine distance is the correct choice and produces
+        significantly better ranking than the ChromaDB default (L2 / Euclidean).
+
         Args:
             collection_name: Name of the vector collection.
-            
+
         Returns:
             The collection object.
         """
         logger.info("Getting or creating collection: %s", collection_name)
         client = self.get_client()
-        return client.get_or_create_collection(name=collection_name)
+        return client.get_or_create_collection(
+            name=collection_name,
+            metadata={"hnsw:space": "cosine"},
+        )
         
     def add_documents(
         self, 

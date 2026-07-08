@@ -83,7 +83,9 @@ class TestCodeChunker(unittest.TestCase):
         # Should fall back to a single file-level chunk
         self.assertEqual(len(chunks), 1)
         self.assertEqual(chunks[0].chunk_type, "file")
-        self.assertEqual(chunks[0].content, content)
+        # Chunks now include a '# File: <path>' header prefix
+        self.assertTrue(chunks[0].content.startswith("# File: src/script.py\n"))
+        self.assertIn(content, chunks[0].content)
         self.assertEqual(chunks[0].metadata["owner"], "user")
         self.assertEqual(chunks[0].metadata["start_line"], 1)
         self.assertEqual(chunks[0].metadata["end_line"], 4)
@@ -105,7 +107,9 @@ class TestCodeChunker(unittest.TestCase):
         # Should gracefully fall back to file-level chunk
         self.assertEqual(len(chunks), 1)
         self.assertEqual(chunks[0].chunk_type, "file")
-        self.assertEqual(chunks[0].content, content)
+        # Chunks now include a '# File: <path>' header prefix
+        self.assertTrue(chunks[0].content.startswith("# File: src/invalid.py\n"))
+        self.assertIn(content, chunks[0].content)
         self.assertEqual(chunks[0].metadata["status"], "broken")
 
     def test_chunk_other_language(self):
@@ -126,10 +130,12 @@ class TestCodeChunker(unittest.TestCase):
         
         chunks = self.chunker.chunk_file(code_file)
         
-        # Non-python languages fall back to file-level chunking
+        # Non-python files now use sliding-window chunking (still 1 chunk for small files)
         self.assertEqual(len(chunks), 1)
         self.assertEqual(chunks[0].chunk_type, "file")
-        self.assertEqual(chunks[0].content, content)
+        # Chunks now include a '# File: <path>' header prefix
+        self.assertTrue(chunks[0].content.startswith("# File: src/index.js\n"))
+        self.assertIn(content, chunks[0].content)
         self.assertEqual(chunks[0].metadata["type"], "frontend")
 
     def test_chunk_empty_file(self):
@@ -143,7 +149,8 @@ class TestCodeChunker(unittest.TestCase):
         
         self.assertEqual(len(chunks), 1)
         self.assertEqual(chunks[0].chunk_type, "file")
-        self.assertEqual(chunks[0].content, "")
+        # Empty file produces a header-only chunk
+        self.assertTrue(chunks[0].content.startswith("# File: src/empty.py"))
 
     def test_chunk_id_stability(self):
         content = "def test():\n    pass"

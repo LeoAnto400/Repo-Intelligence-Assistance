@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     
     # Vector Database
     CHROMA_DB_DIR: str = Field("./chroma_db", description="Local directory path where ChromaDB collections are stored")
+
+    # Retrieval & Reranking
+    RETRIEVAL_TOP_K: int = Field(20, description="Number of ANN candidates fetched from ChromaDB before reranking")
+    RETRIEVAL_FINAL_K: int = Field(5, description="Number of reranked chunks passed to the LLM for answer generation")
     
     class Config:
         env_file = ".env"

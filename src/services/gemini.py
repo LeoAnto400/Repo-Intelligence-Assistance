@@ -243,17 +243,27 @@ class GeminiService:
             or "rate limit" in err_msg
         )
 
-    def generate_embedding(self, text: str, model: str = "models/gemini-embedding-001") -> List[float]:
+    def generate_embedding(
+        self,
+        text: str,
+        model: str = "models/gemini-embedding-001",
+        task_type: str = "retrieval_query",
+    ) -> List[float]:
         """
         Convert raw text into high-dimensional vector embeddings.
-        
+
         Args:
             text: Code snippet or paragraph to embed.
             model: Embedding model name.
-            
+            task_type: Gemini task type. Use ``"retrieval_query"`` when embedding
+                a user search query (the default) and ``"retrieval_document"``
+                when embedding documents during ingestion.  Using the wrong type
+                produces misaligned vectors and is the most common cause of bad
+                retrieval results.
+
         Returns:
             List of float values representing the embedding vector.
-            
+
         Raises:
             ValueError: If the text is empty or invalid.
             RuntimeError: If the API call fails.
@@ -263,17 +273,21 @@ class GeminiService:
             raise ValueError("Text input for embedding cannot be empty.")
 
         try:
-            logger.debug("Generating embedding for text using model %s", model)
+            logger.debug(
+                "Generating embedding for text using model %s with task_type=%s",
+                model,
+                task_type,
+            )
             response = self._call_with_retry(
                 self._client.embed_content,
                 model=model,
                 content=text,
-                task_type="retrieval_document"
+                task_type=task_type,
             )
             if "embedding" not in response:
                 logger.error("API response did not contain 'embedding' key: %s", response)
                 raise RuntimeError("Invalid API response format: 'embedding' key not found.")
-            
+
             return response["embedding"]
         except Exception as e:
             logger.exception("Failed to generate embedding due to API error")
