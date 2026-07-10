@@ -40,7 +40,7 @@ src/
    ```
    Or run directly with uvicorn:
    ```bash
-   uvicorn src.api.main:app --reload
+uvicorn src.api.main:app --reload
    ```
 
    Current Status
