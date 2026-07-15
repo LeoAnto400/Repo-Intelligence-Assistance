@@ -71,6 +71,9 @@ class RateLimiter:
         self.max_tpm = get_int_value(max_tpm, 10000)
         # Each element is a tuple of (timestamp, token_count)
         self.requests = deque()
+        logger.info(
+            "RateLimiter initialized: max_rpm=%d, max_tpm=%d", self.max_rpm, self.max_tpm
+        )
 
     def record_request(self, token_count: int) -> None:
         self.requests.append((time.time(), token_count))
@@ -139,7 +142,7 @@ class GeminiService:
         # Initialize RateLimiter and adaptive batching configurations
         self._rate_limiter = RateLimiter(
             max_rpm=settings.MAX_REQUESTS_PER_MINUTE,
-            max_tpm=settings.MAX_TOKENS_PER_BATCH
+            max_tpm=settings.MAX_TOKENS_PER_MINUTE
         )
         self.current_batch_size = get_int_value(settings.EMBED_BATCH_SIZE, 5)
 

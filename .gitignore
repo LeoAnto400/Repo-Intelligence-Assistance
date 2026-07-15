@@ -36,3 +36,5 @@ chroma_db/
 
 # Environment
 .env
+.claude
+start-app.bat

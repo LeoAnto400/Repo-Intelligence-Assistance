@@ -21,6 +21,12 @@ function asStringArray(value: unknown): string[] {
     : [];
 }
 
+/** Appends only well-formed, non-empty string lines to a log array, dropping anything malformed. */
+export function appendLogLines(current: string[], ...lines: unknown[]): string[] {
+  const sanitized = lines.filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
+  return sanitized.length ? [...current, ...sanitized] : current;
+}
+
 export function normalizeRepositoryContext(value: unknown): RepositoryContextResponse {
   const response = value && typeof value === 'object' ? value as Partial<RepositoryContextResponse> : {};
   const metadata = response.metadata && typeof response.metadata === 'object'

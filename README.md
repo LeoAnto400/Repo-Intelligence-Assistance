@@ -35,7 +35,7 @@ pip install -r requirements.txt
 
 `powershell
 cd backend
-python -m uvicorn src.api.main:app --reload --host 0.0.0.0 --port 8000
+python -m uvicorn src.api.main:app --reload --reload-dir src --host 0.0.0.0 --port 8000
 ` 
 
 4. In a second terminal, start the frontend:
@@ -46,4 +46,4 @@ npm install
 npm run dev
 ` 
 
-Open the frontend at "http://localhost:3000". The frontend proxies API requests to the backend, including when opened via the configured LAN address.
+Open the frontend at "http://localhost:3000". The frontend calls the FastAPI backend directly (not through a Next.js rewrite - `next dev`'s rewrite proxy has a hardcoded ~20s timeout that would kill any real repository ingestion), resolving the backend host from whichever host the page was loaded from, so this also works when opened via the configured LAN address.

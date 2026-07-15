@@ -7,7 +7,8 @@ class Settings(BaseSettings):
     """
     PROJECT_NAME: str = "GitHub Repository Intelligence Assistant"
     API_V1_STR: str = "/api/v1"
-    
+    LOG_LEVEL: str = Field("INFO", description="Root logger level (DEBUG, INFO, WARNING, ERROR)")
+
     # API Keys & Credentials
     GEMINI_API_KEY: str = Field("", description="Google Gemini API Key for LLM and embeddings generation")
     GITHUB_TOKEN: str | None = Field(None, description="GitHub personal access token (optional, for higher rate limits)")
@@ -19,8 +20,17 @@ class Settings(BaseSettings):
     EMBED_BATCH_SIZE: int = Field(5, description="Maximum number of chunks to send per Gemini embedding request")
     EMBED_BATCH_DELAY: float = Field(0.5, description="Delay between Gemini embedding batches in seconds")
     MAX_RETRIES: int = Field(5, description="Maximum retries for rate-limited calls")
-    MAX_TOKENS_PER_BATCH: int = Field(10000, description="Maximum estimated input tokens per request batch")
+    MAX_TOKENS_PER_BATCH: int = Field(10000, description="Maximum estimated input tokens per single embedding request")
     MAX_REQUESTS_PER_MINUTE: int = Field(100, description="Maximum API requests per minute to stay below limit")
+    MAX_TOKENS_PER_MINUTE: int = Field(
+        1_000_000,
+        description=(
+            "Maximum estimated tokens sent to the Gemini API per rolling 60-second "
+            "window. Must stay well above MAX_TOKENS_PER_BATCH - it bounds total "
+            "throughput, not a single request, and reusing the per-batch cap here "
+            "throttles ingestion to ~1 batch/minute regardless of repo size."
+        ),
+    )
     
     # Vector Database
     CHROMA_DB_DIR: str = Field("./chroma_db", description="Local directory path where ChromaDB collections are stored")

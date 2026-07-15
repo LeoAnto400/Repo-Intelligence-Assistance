@@ -40,7 +40,7 @@ function FeatureCard({ title, description, icon: Icon, glowColor }: FeatureCardP
 }
 
 import { useIngestStore } from '@/features/ingestion/store/useIngestStore';
-import { getErrorMessage } from '@/lib/runtime-safety';
+import { appendLogLines, getErrorMessage } from '@/lib/runtime-safety';
 
 export default function Home() {
   const [repoUrl, setRepoUrl] = useState('');
@@ -105,7 +105,7 @@ export default function Home() {
     setIsSimulating(true);
     setSimStep(0);
     setProgress(0);
-    setSimLogs(['INFO:   Initializing repo ingest sequence', 'INFO:   Validating source repo URL structures']);
+    setSimLogs(appendLogLines([], 'INFO:   Initializing repo ingest sequence', 'INFO:   Validating source repo URL structures'));
 
     try {
       // Trigger actual backend ingestion call
@@ -114,11 +114,11 @@ export default function Home() {
       // On success, snap to 100% and show success log
       setProgress(100);
       setSimStep(5);
-      setSimLogs(prev => [
-        ...prev,
+      setSimLogs(prev => appendLogLines(
+        prev,
         'INFO:   Indexing complete. Resolving schema interfaces...',
         'SUCCESS: Ingestion workflow pipeline fully resolved'
-      ]);
+      ));
 
       // Wait 1 second to show completion state, then fetch active workspace details
       completionTimeout.current = setTimeout(async () => {
@@ -158,7 +158,7 @@ export default function Home() {
     let logIdx = 0;
     const logInterval = setInterval(() => {
       if (logIdx < logsList.length) {
-        setSimLogs((prev) => [...prev, logsList[logIdx]]);
+        setSimLogs((prev) => appendLogLines(prev, logsList[logIdx]));
         setSimStep((prev) => Math.min(prev + 1, 4));
         logIdx++;
       }
@@ -348,7 +348,7 @@ export default function Home() {
               <div className="space-y-2">
                 <h4 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">System Output Logs</h4>
                 <div className="h-32 bg-zinc-950 border border-zinc-850 rounded-lg p-3 font-mono text-[10px] text-zinc-400 space-y-1.5 overflow-y-auto select-none">
-                  {simLogs.map((log, index) => (
+                  {simLogs.filter((log): log is string => typeof log === 'string' && log.length > 0).map((log, index) => (
                     <div key={index} className="flex gap-2">
                       <span className="text-zinc-600">[{index + 1}]</span>
                       <span className={
