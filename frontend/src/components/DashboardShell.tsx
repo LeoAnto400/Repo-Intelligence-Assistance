@@ -1,6 +1,8 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   LayoutDashboard,
@@ -32,14 +34,23 @@ interface NavItem {
   name: string;
   icon: React.ComponentType<{ className?: string }>;
   badge?: string | number;
+  href?: string;
 }
 
 import { useRepoStore } from '@/features/repo-metadata/store/useRepoStore';
 
 export default function DashboardShell({ children }: DashboardShellProps) {
   const repository = useRepoStore((state) => state.repository);
+  const fetchContext = useRepoStore((state) => state.fetchContext);
+  const pathname = usePathname();
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isMobileOpen, setIsMobileOpen] = useState(false);
+
+  // Bootstraps active-repository state once per app load, regardless of which
+  // route is entered first (deep-linking to /chat must see it too).
+  useEffect(() => {
+    void fetchContext();
+  }, [fetchContext]);
   const [activeItem, setActiveItem] = useState('Overview');
 
   if (!repository) {
@@ -85,14 +96,16 @@ export default function DashboardShell({ children }: DashboardShellProps) {
   }
 
   const navItems: NavItem[] = [
-    { name: 'Overview', icon: LayoutDashboard },
-    { name: 'Chat', icon: MessageSquare, badge: 'AI' },
+    { name: 'Overview', icon: LayoutDashboard, href: '/' },
+    { name: 'Chat', icon: MessageSquare, badge: 'AI', href: '/chat' },
     { name: 'Commits', icon: GitCommit },
     { name: 'Pull Requests', icon: GitPullRequest, badge: 2 },
     { name: 'Issues', icon: CircleAlert },
     { name: 'File Explorer', icon: FolderOpen },
     { name: 'Settings', icon: Settings },
   ];
+
+  const currentLabel = navItems.find((item) => item.href === pathname)?.name ?? activeItem;
 
   return (
     <div className="flex min-h-screen bg-zinc-950 text-zinc-100 font-sans antialiased selection:bg-indigo-500/30 selection:text-indigo-200">
@@ -163,22 +176,17 @@ export default function DashboardShell({ children }: DashboardShellProps) {
           <nav className="p-3 space-y-1">
             {navItems.map((item) => {
               const Icon = item.icon;
-              const isActive = activeItem === item.name;
+              const isActive = item.href ? pathname === item.href : activeItem === item.name;
 
-              return (
-                <button
-                  key={item.name}
-                  onClick={() => {
-                    setActiveItem(item.name);
-                    setIsMobileOpen(false);
-                  }}
-                  className={cn(
-                    "w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 relative group",
-                    isActive
-                      ? "text-zinc-50 bg-zinc-800/80 border border-zinc-700/30 shadow-sm"
-                      : "text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/30 border border-transparent"
-                  )}
-                >
+              const itemClassName = cn(
+                "w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 relative group",
+                isActive
+                  ? "text-zinc-50 bg-zinc-800/80 border border-zinc-700/30 shadow-sm"
+                  : "text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/30 border border-transparent"
+              );
+
+              const itemContent = (
+                <>
                   <div className="flex items-center gap-3">
                     <Icon className={cn("h-4.5 w-4.5 shrink-0", isActive ? "text-indigo-400" : "text-zinc-400 group-hover:text-zinc-200")} />
                     {!isCollapsed && (
@@ -191,12 +199,12 @@ export default function DashboardShell({ children }: DashboardShellProps) {
                       </motion.span>
                     )}
                   </div>
-                  
+
                   {/* Badges */}
                   {!isCollapsed && item.badge && (
                     <span className={cn(
                       "px-1.5 py-0.5 rounded text-[10px] font-semibold leading-none",
-                      item.badge === 'AI' 
+                      item.badge === 'AI'
                         ? "bg-indigo-500/10 text-indigo-400 border border-indigo-500/20"
                         : "bg-zinc-800 text-zinc-400"
                     )}>
@@ -210,6 +218,32 @@ export default function DashboardShell({ children }: DashboardShellProps) {
                       {item.name}
                     </div>
                   )}
+                </>
+              );
+
+              if (item.href) {
+                return (
+                  <Link
+                    key={item.name}
+                    href={item.href}
+                    onClick={() => setIsMobileOpen(false)}
+                    className={itemClassName}
+                  >
+                    {itemContent}
+                  </Link>
+                );
+              }
+
+              return (
+                <button
+                  key={item.name}
+                  onClick={() => {
+                    setActiveItem(item.name);
+                    setIsMobileOpen(false);
+                  }}
+                  className={itemClassName}
+                >
+                  {itemContent}
                 </button>
               );
             })}
@@ -272,7 +306,7 @@ export default function DashboardShell({ children }: DashboardShellProps) {
               <span className="text-zinc-600">/</span>
               <span className="hover:text-zinc-200 cursor-pointer transition-colors">repo-intelligence-assistance</span>
               <span className="text-zinc-600">/</span>
-              <span className="text-zinc-200 font-medium">{activeItem}</span>
+              <span className="text-zinc-200 font-medium">{currentLabel}</span>
             </div>
           </div>
 

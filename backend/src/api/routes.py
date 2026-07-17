@@ -18,6 +18,7 @@ from src.api.schemas import (
     QueryRequest,
     QueryResponse,
     RepositoryContextResponse,
+    RepositorySummary,
 )
 from src.core.config import settings
 from src.db.chroma import VectorStoreManager
@@ -58,6 +59,7 @@ def _build_chunks(files: List[Dict[str, Any]], chunker: CodeChunker, repository:
 def _store_chunks(
     vector_store: VectorStoreManager,
     repository: str,
+    repo_url: str,
     documents: List[str],
     embeddings: List[List[float]],
     metadatas: List[Dict[str, Any]],
@@ -70,6 +72,7 @@ def _store_chunks(
         embeddings=embeddings,
         metadatas=metadatas,
         ids=ids,
+        collection_metadata={"repo_url": repo_url},
     )
 
 
@@ -262,7 +265,7 @@ async def ingest_repository(
     step_start = time.perf_counter()
     try:
         await run_in_threadpool(
-            _store_chunks, vector_store, repository, documents, embeddings, metadatas, ids
+            _store_chunks, vector_store, repository, repo_url, documents, embeddings, metadatas, ids
         )
     except Exception as e:
         log.exception("ChromaDB storage failed during ingestion")
@@ -324,6 +327,73 @@ async def get_repository_context() -> RepositoryContextResponse:
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No repository has been ingested yet.",
         )
+
+    return RepositoryContextResponse(**context)
+
+
+@router.get("/repositories", response_model=List[RepositorySummary])
+async def list_repositories(
+    vector_store: VectorStoreManager = Depends(get_vector_store),
+) -> List[RepositorySummary]:
+    """Lists every repository already indexed in the vector store, so the
+    frontend can offer to reactivate one instead of re-ingesting it."""
+    collections = await run_in_threadpool(vector_store.list_collections)
+    return [
+        RepositorySummary(
+            repository=item["name"],
+            repo_url=item["repo_url"],
+            chunk_count=item["chunk_count"],
+        )
+        for item in collections
+    ]
+
+
+@router.post("/repositories/{repository}/select", response_model=RepositoryContextResponse)
+async def select_repository(
+    repository: str,
+    vector_store: VectorStoreManager = Depends(get_vector_store),
+    github_service: GitHubService = Depends(get_github_service),
+) -> RepositoryContextResponse:
+    """Activates a previously ingested repository for /query without re-cloning
+    or re-embedding it. Repository metadata (stars, commits, PRs) is refreshed
+    live from GitHub when the repo's URL was recorded at ingestion time; the
+    repository is still activated for chat even if that refresh fails."""
+    select_id = uuid.uuid4().hex[:8]
+    log = _TaggedLogAdapter(logger, {"tag": f"select:{select_id}"})
+
+    collections = await run_in_threadpool(vector_store.list_collections)
+    match = next((item for item in collections if item["name"] == repository), None)
+    if match is None:
+        log.error("Selected repository not found in vector store: %s", repository)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Repository '{repository}' has not been ingested.",
+        )
+
+    repo_url = match["repo_url"]
+    context: Dict[str, Any] = {
+        "repository": repository,
+        "repo_url": repo_url or "",
+        "metadata": {},
+        "files": [],
+        "commits": [],
+        "pull_requests": [],
+    }
+
+    if repo_url:
+        try:
+            fetched = await run_in_threadpool(
+                github_service.fetch_repository_context, repo_url, files=[]
+            )
+            context.update(fetched)
+        except Exception as e:
+            log.warning(
+                "Metadata refresh failed for %s, activating with minimal context: %s", repo_url, e
+            )
+
+    set_active_repository(repository)
+    set_active_repository_context(context)
+    log.info("Activated repository: %s", repository)
 
     return RepositoryContextResponse(**context)
 

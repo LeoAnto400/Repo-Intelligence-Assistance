@@ -34,7 +34,9 @@ class VectorStoreManager:
             )
         return self._client
 
-    def get_collection(self, collection_name: str) -> Collection:
+    def get_collection(
+        self, collection_name: str, extra_metadata: Optional[Dict[str, Any]] = None
+    ) -> Collection:
         """
         Get or create a Chroma collection by name.
 
@@ -45,6 +47,10 @@ class VectorStoreManager:
 
         Args:
             collection_name: Name of the vector collection.
+            extra_metadata: Additional metadata to persist on the collection
+                (e.g. ``repo_url``) so it can be recovered later without a
+                separate registry. Only applied when the collection is first
+                created; ignored if it already exists.
 
         Returns:
             The collection object.
@@ -53,26 +59,48 @@ class VectorStoreManager:
         client = self.get_client()
         return client.get_or_create_collection(
             name=collection_name,
-            metadata={"hnsw:space": "cosine"},
+            metadata={"hnsw:space": "cosine", **(extra_metadata or {})},
         )
+
+    def list_collections(self) -> List[Dict[str, Any]]:
+        """
+        List every collection currently persisted in the vector store, along
+        with whatever metadata (e.g. ``repo_url``) and document count each one
+        carries. Used to let the frontend offer already-ingested repositories
+        without re-ingesting them.
+        """
+        client = self.get_client()
+        collections = client.list_collections()
+        results: List[Dict[str, Any]] = []
+        for collection in collections:
+            metadata = collection.metadata or {}
+            results.append({
+                "name": collection.name,
+                "repo_url": metadata.get("repo_url"),
+                "chunk_count": collection.count(),
+            })
+        return results
         
     def add_documents(
-        self, 
-        collection_name: str, 
-        documents: List[str], 
-        embeddings: List[List[float]], 
-        metadatas: List[Dict[str, Any]], 
-        ids: List[str]
+        self,
+        collection_name: str,
+        documents: List[str],
+        embeddings: List[List[float]],
+        metadatas: List[Dict[str, Any]],
+        ids: List[str],
+        collection_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Add raw documents and their corresponding vector embeddings to ChromaDB.
-        
+
         Args:
             collection_name: Destination collection.
             documents: List of plain text code snippets/documents.
             embeddings: List of calculated float vectors.
             metadatas: Associated file metadata (file path, range, etc.).
             ids: List of unique document identifiers.
+            collection_metadata: Extra metadata to stamp on the collection itself
+                (e.g. ``repo_url``), forwarded to :meth:`get_collection`.
         """
         if not ids:
             logger.warning("Empty list of document IDs provided. No documents added.")
@@ -86,7 +114,7 @@ class VectorStoreManager:
             raise ValueError("All lists must be of the same length.")
 
         logger.info("Adding %d documents to collection: %s", len(ids), collection_name)
-        collection = self.get_collection(collection_name)
+        collection = self.get_collection(collection_name, extra_metadata=collection_metadata)
         collection.add(
             ids=ids,
             embeddings=embeddings,

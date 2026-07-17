@@ -1,5 +1,5 @@
 import { BaseService } from '@/services/base-service';
-import { RepositoryContextResponse } from '@/types/api';
+import { RepositoryContextResponse, RepositorySummary } from '@/types/api';
 
 export class RepositoryService extends BaseService {
   private static instance: RepositoryService;
@@ -20,6 +20,20 @@ export class RepositoryService extends BaseService {
    */
   public async getRepositoryContext(): Promise<RepositoryContextResponse> {
     return this.get<RepositoryContextResponse>('/repository');
+  }
+
+  /**
+   * Lists every repository already indexed in the vector store.
+   */
+  public async listRepositories(): Promise<RepositorySummary[]> {
+    return this.get<RepositorySummary[]>('/repositories');
+  }
+
+  /**
+   * Activates a previously ingested repository without re-ingesting it.
+   */
+  public async selectRepository(repository: string): Promise<RepositoryContextResponse> {
+    return this.post<RepositoryContextResponse>(`/repositories/${encodeURIComponent(repository)}/select`);
   }
 }
 

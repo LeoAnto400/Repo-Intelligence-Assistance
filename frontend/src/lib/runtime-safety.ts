@@ -3,6 +3,7 @@
   QueryResponse,
   RepositoryContextResponse,
   RepositoryMetadata,
+  RepositorySummary,
 } from '@/types/api';
 
 export function getErrorMessage(error: unknown, fallback: string): string {
@@ -57,6 +58,18 @@ export function normalizeIngestResponse(value: IngestResponse): IngestResponse {
     chunks_created: Number.isFinite(value.chunks_created) ? value.chunks_created : 0,
     repo_url: asString(value.repo_url) ?? undefined,
   };
+}
+
+export function normalizeRepositorySummaries(value: unknown): RepositorySummary[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+    .map((item) => ({
+      repository: asString(item.repository) ?? '',
+      repo_url: asString(item.repo_url),
+      chunk_count: typeof item.chunk_count === 'number' && Number.isFinite(item.chunk_count) ? item.chunk_count : 0,
+    }))
+    .filter((item) => item.repository.length > 0);
 }
 
 export function normalizeQueryResponse(value: QueryResponse): QueryResponse {

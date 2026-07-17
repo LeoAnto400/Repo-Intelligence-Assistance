@@ -16,6 +16,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { useRepoStore } from '@/features/repo-metadata/store/useRepoStore';
 import { RepositoryDashboard } from '@/features/repo-metadata/components/RepositoryDashboard';
+import { RepositoryPicker } from '@/features/repo-metadata/components/RepositoryPicker';
 
 interface FeatureCardProps {
   title: string;
@@ -53,10 +54,8 @@ export default function Home() {
 
   const { ingestRepo } = useIngestStore();
   const { fetchContext, repository } = useRepoStore();
+  const hasAvailableRepositories = useRepoStore((state) => state.availableRepositories.length > 0);
 
-  useEffect(() => {
-    void fetchContext();
-  }, [fetchContext]);
   useEffect(() => () => {
     if (completionTimeout.current) clearTimeout(completionTimeout.current);
   }, []);
@@ -200,8 +199,18 @@ export default function Home() {
           </p>
         </div>
 
+        {/* Previously Ingested Repositories */}
+        <RepositoryPicker />
+
         {/* Input Ingest Section */}
         <div className="max-w-xl mx-auto space-y-4">
+          {hasAvailableRepositories && (
+            <div className="mx-auto flex max-w-2xl items-center gap-3 text-[11px] text-zinc-600">
+              <span className="h-px flex-1 bg-zinc-800/60" />
+              <span>or ingest a new repository</span>
+              <span className="h-px flex-1 bg-zinc-800/60" />
+            </div>
+          )}
           <form onSubmit={handleAnalyze} className="relative flex items-center p-1.5 bg-zinc-900/60 border border-zinc-800/80 rounded-xl focus-within:border-zinc-700/80 focus-within:ring-1 focus-within:ring-zinc-700/50 transition-all">
             <Search className="absolute left-4 h-4.5 w-4.5 text-zinc-500" />
             <input

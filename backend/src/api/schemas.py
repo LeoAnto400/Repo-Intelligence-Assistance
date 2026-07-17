@@ -24,6 +24,12 @@ class QueryResponse(BaseModel):
     source_files: List[str]
     retrieved_chunks: int
 
+class RepositorySummary(BaseModel):
+    """Summary of a repository already indexed in the vector store, for the repo picker."""
+    repository: str
+    repo_url: Optional[str] = None
+    chunk_count: int = 0
+
 class RepositoryContextResponse(BaseModel):
     """Repository metadata and source snapshot for the active ingested repository."""
     repository: str

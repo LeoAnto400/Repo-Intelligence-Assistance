@@ -57,6 +57,12 @@ export interface RepositoryMetadata {
   [key: string]: unknown;
 }
 
+export interface RepositorySummary {
+  repository: string;
+  repo_url: string | null;
+  chunk_count: number;
+}
+
 export interface RepositoryContextResponse {
   repository: string;
   repo_url: string;

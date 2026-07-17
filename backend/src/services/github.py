@@ -141,6 +141,8 @@ class GitHubService:
         """
         Fetch repository metadata, commits, pull requests, and the current source snapshot.
         The file list can be supplied from ingestion to avoid cloning the repository twice.
+        Pass an empty list (rather than omitting the argument) to skip the source
+        snapshot entirely without triggering a clone.
         """
         owner, repo_name = self.parse_repo_url(repo_url)
         try:
@@ -189,7 +191,7 @@ class GitHubService:
                         "contributors": contributors,
                         "html_url": repo.html_url,
                     },
-                    "files": files or self.fetch_repo_files(repo_url),
+                    "files": files if files is not None else self.fetch_repo_files(repo_url),
                     "commits": commits,
                     "pull_requests": pull_requests,
                 }
