@@ -1,6 +1,6 @@
 # Known Gaps / Fixes
 
-Punch list from a frontend + backend audit on 2026-07-21. Nothing here has been implemented yet.
+Punch list from a frontend + backend audit on 2026-07-21. Everything is done except auth/authz, which was intentionally deferred (see the backend section).
 
 ## Backend
 
@@ -19,8 +19,8 @@ Punch list from a frontend + backend audit on 2026-07-21. Nothing here has been 
 - [x] Extract ingestion UI out of `app/page.tsx` into `features/ingestion/components/` — the feature has `services/` and `store/` but no `components/`, unlike every other feature module (chat, commits, repo-metadata). Added `IngestPanel.tsx`; `app/page.tsx` is now a thin composition of `RepositoryPicker` + `IngestPanel` + feature cards.
 - [x] Add a repo management view (delete / re-ingest) to pair with the backend DELETE endpoint above. Added `/settings` (linked from the sidebar's existing "Settings" item) rendering `RepositoryManager`, which lists every ingested repo with Activate / Re-ingest / Delete actions. Re-ingest reuses `POST /ingest` (which already resets the target collection), so no new backend endpoint was needed for it.
 - [x] Add `.env.example` for both `frontend/` and `backend/` — no template for required env vars, makes onboarding guesswork.
-- [ ] Confirm whether CI (`.github/workflows`) exists; if not, add lint/test/build checks on PRs.
+- [x] Confirm whether CI (`.github/workflows`) exists; if not, add lint/test/build checks on PRs. Added `.github/workflows/ci.yml` with a backend job (`pip install -r requirements.txt` + `pytest`) and a frontend job (`npm ci`, lint, `tsc --noEmit`, `npm test`, `npm run build`). Along the way, fixed 3 pre-existing stale test assertions (missing `task_type` kwargs) and discovered `tests/personal_test.py` was a manual debug script — not real pytest tests, just top-level code — that pytest was silently collecting and executing on every run, making real Gemini API calls; added `backend/pytest.ini` (`testpaths = tests`, `--ignore=tests/personal_test.py`) so CI (and local runs) don't hit that or need real credentials.
 
 ## Cross-cutting
 
-- [ ] Reconcile chat UI (built for streaming) with backend `/query` (blocking) — decide whether to implement SSE/websocket streaming end-to-end or drop the `TypingIndicator` streaming affordance.
+- [x] Reconcile chat UI (built for streaming) with backend `/query` (blocking) — decide whether to implement SSE/websocket streaming end-to-end or drop the `TypingIndicator` streaming affordance. Implemented end-to-end: `features/chat/services/queryStream.ts` is a `WS /api/v1/ws/query` client (single reused connection, `retrieval`/`token`/`done`/`error` events); `useChatStore` streams tokens into the message as they arrive and falls back to the blocking `POST /query` if the websocket fails to connect (e.g. a proxy blocking upgrades). `MessageBubble` now shows the typing indicator only while no tokens have arrived yet, then renders the growing answer.

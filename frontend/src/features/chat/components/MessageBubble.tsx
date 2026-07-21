@@ -41,7 +41,7 @@ export function MessageBubble({ message, onRetry }: MessageBubbleProps) {
                 : 'border border-zinc-800 bg-zinc-900/60 text-zinc-100'
           )}
         >
-          {isPending ? (
+          {isPending && !message.content ? (
             <TypingIndicator />
           ) : isUser ? (
             <p className="whitespace-pre-wrap">{message.content}</p>

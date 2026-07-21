@@ -129,9 +129,10 @@ class TestAdaptiveBatching(unittest.TestCase):
     def test_token_aware_batching_splits_on_token_limit(self, mock_configure, mock_sleep):
         """Chunks exceeding token limit should be sent in separate batches."""
         service = GeminiService(api_key="key")
-        # Each text = 200 chars = 50 tokens; token limit = 60 so max 1 per batch
-        text = "x" * 200
-        texts = [text, text]
+        # Each text = 200 chars = 50 tokens; token limit = 60 so max 1 per batch.
+        # Content must differ between the two, or content-hash deduplication
+        # collapses them into a single embedding call instead of two batches.
+        texts = ["x" * 200, "y" * 200]
 
         service._client.embed_content = MagicMock(side_effect=[
             {"embedding": [[0.1]]},

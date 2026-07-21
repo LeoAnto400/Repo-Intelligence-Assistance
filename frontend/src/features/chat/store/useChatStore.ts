@@ -1,5 +1,6 @@
 import { create, type StoreApi } from 'zustand';
 import { queryService } from '../services/query';
+import { queryStreamClient } from '../services/queryStream';
 import { getErrorMessage, normalizeQueryResponse } from '@/lib/runtime-safety';
 
 export interface ChatMessage {
@@ -29,24 +30,56 @@ function createId(): string {
 
 type SetState = StoreApi<ChatState>['setState'];
 
+function appendToken(assistantMessageId: string, text: string, set: SetState): void {
+  set((state) => ({
+    messages: state.messages.map((message) =>
+      message.id === assistantMessageId ? { ...message, content: message.content + text } : message
+    ),
+  }));
+}
+
+function finalizeMessage(
+  assistantMessageId: string,
+  response: { answer: string; source_files: string[]; retrieved_chunks: number },
+  set: SetState
+): void {
+  set((state) => ({
+    isLoading: false,
+    messages: state.messages.map((message) =>
+      message.id === assistantMessageId
+        ? {
+            ...message,
+            status: 'complete',
+            content: response.answer,
+            sourceFiles: response.source_files,
+            retrievedChunks: response.retrieved_chunks,
+            timestamp: new Date(),
+          }
+        : message
+    ),
+  }));
+}
+
 async function runQuery(assistantMessageId: string, question: string, set: SetState): Promise<void> {
   try {
+    const result = await queryStreamClient.query(question, {
+      onToken: (text) => appendToken(assistantMessageId, text, set),
+    });
+    finalizeMessage(
+      assistantMessageId,
+      { answer: result.answer, source_files: result.sourceFiles, retrieved_chunks: result.retrievedChunks },
+      set
+    );
+    return;
+  } catch {
+    // Streaming path unavailable (e.g. a proxy that blocks websocket
+    // upgrades) - fall back to the blocking REST endpoint below rather than
+    // surfacing what may just be a transport-level failure.
+  }
+
+  try {
     const response = normalizeQueryResponse(await queryService.queryRepository(question));
-    set((state) => ({
-      isLoading: false,
-      messages: state.messages.map((message) =>
-        message.id === assistantMessageId
-          ? {
-              ...message,
-              status: 'complete',
-              content: response.answer,
-              sourceFiles: response.source_files,
-              retrievedChunks: response.retrieved_chunks,
-              timestamp: new Date(),
-            }
-          : message
-      ),
-    }));
+    finalizeMessage(assistantMessageId, response, set);
   } catch (err: unknown) {
     const errorMessage = getErrorMessage(err, 'Failed to get answer from assistant.');
     set((state) => ({

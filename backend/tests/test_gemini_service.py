@@ -38,7 +38,7 @@ class TestGeminiService(unittest.TestCase):
         service._client.embed_content.assert_called_once_with(
             model="models/gemini-embedding-001",
             content="hello world",
-            task_type="retrieval_document"
+            task_type="retrieval_query"
         )
         self.assertEqual(result, dummy_embedding)
 

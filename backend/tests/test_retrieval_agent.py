@@ -75,7 +75,9 @@ class TestRetrievalAgentAsync(unittest.IsolatedAsyncioTestCase):
         )
         
         # Assertions
-        self.mock_gemini_service.generate_embedding.assert_called_once_with("addition or subtraction")
+        self.mock_gemini_service.generate_embedding.assert_called_once_with(
+            "addition or subtraction", task_type="retrieval_query"
+        )
         self.mock_vector_store.query_similarity.assert_called_once_with(
             collection_name="math-repo",
             query_embedding=dummy_embedding,
