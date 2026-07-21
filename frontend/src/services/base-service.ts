@@ -17,4 +17,9 @@ export abstract class BaseService {
     const response = await this.client.post<T>(url, data, config);
     return response.data;
   }
+
+  protected async delete<T>(url: string, config = {}): Promise<T> {
+    const response = await this.client.delete<T>(url, config);
+    return response.data;
+  }
 }

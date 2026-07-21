@@ -102,7 +102,7 @@ export default function DashboardShell({ children }: DashboardShellProps) {
     { name: 'Pull Requests', icon: GitPullRequest, badge: 2 },
     { name: 'Issues', icon: CircleAlert },
     { name: 'File Explorer', icon: FolderOpen },
-    { name: 'Settings', icon: Settings },
+    { name: 'Settings', icon: Settings, href: '/settings' },
   ];
 
   const currentLabel = navItems.find((item) => item.href === pathname)?.name ?? activeItem;

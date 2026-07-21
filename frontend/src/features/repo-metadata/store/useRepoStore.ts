@@ -23,6 +23,7 @@ interface RepoState {
   fetchContext: () => Promise<void>;
   fetchAvailableRepositories: () => Promise<void>;
   selectRepository: (repository: string) => Promise<void>;
+  deleteRepository: (repository: string) => Promise<void>;
   reset: () => void;
 }
 
@@ -94,6 +95,16 @@ export const useRepoStore = create<RepoState>((set) => ({
       });
       throw err;
     }
+  },
+
+  deleteRepository: async (repository: string) => {
+    await repositoryService.deleteRepository(repository);
+    set((state) => ({
+      availableRepositories: state.availableRepositories.filter((item) => item.repository !== repository),
+      ...(state.repository === repository
+        ? { repository: null, repoUrl: null, metadata: null, files: [], commits: [], pullRequests: [] }
+        : {}),
+    }));
   },
 
   reset: () =>

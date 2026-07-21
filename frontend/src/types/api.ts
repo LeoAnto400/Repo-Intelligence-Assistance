@@ -73,6 +73,11 @@ export interface RepositorySummary {
   chunk_count: number;
 }
 
+export interface DeleteRepositoryResponse {
+  repository: string;
+  status: string;
+}
+
 export interface RepositoryContextResponse {
   repository: string;
   repo_url: string;

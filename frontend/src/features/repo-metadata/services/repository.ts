@@ -1,5 +1,5 @@
 import { BaseService } from '@/services/base-service';
-import { RepositoryContextResponse, RepositorySummary } from '@/types/api';
+import { DeleteRepositoryResponse, RepositoryContextResponse, RepositorySummary } from '@/types/api';
 
 export class RepositoryService extends BaseService {
   private static instance: RepositoryService;
@@ -34,6 +34,13 @@ export class RepositoryService extends BaseService {
    */
   public async selectRepository(repository: string): Promise<RepositoryContextResponse> {
     return this.post<RepositoryContextResponse>(`/repositories/${encodeURIComponent(repository)}/select`);
+  }
+
+  /**
+   * Deletes a previously ingested repository's vector collection.
+   */
+  public async deleteRepository(repository: string): Promise<DeleteRepositoryResponse> {
+    return this.delete<DeleteRepositoryResponse>(`/repositories/${encodeURIComponent(repository)}`);
   }
 }
 
