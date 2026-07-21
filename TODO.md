@@ -13,8 +13,8 @@ Punch list from a frontend + backend audit on 2026-07-21. Nothing here has been 
 
 ## Frontend
 
-- [ ] Add a test setup (Vitest/Jest + React Testing Library, or Playwright for e2e) — there are currently zero frontend test files, while the backend has a full `tests/` suite.
-- [ ] Add `app/error.tsx` and `app/not-found.tsx` — no custom error boundary or 404 page, falls back to Next.js defaults.
+- [x] Add a test setup (Vitest/Jest + React Testing Library, or Playwright for e2e) — there are currently zero frontend test files, while the backend has a full `tests/` suite. Added Vitest + React Testing Library (`vitest.config.ts`, `npm test`), with 22 tests covering `lib/runtime-safety.ts`, `lib/utils.ts`, the `Button` component, and `useChatStore`.
+- [x] Add `app/error.tsx` and `app/not-found.tsx` — no custom error boundary or 404 page, falls back to Next.js defaults. Added both, styled to match the existing dark dashboard theme; verified with `next build`.
 - [ ] Add `app/loading.tsx` / suspense fallbacks for route transitions (currently only the home page has a custom ingestion-progress UI).
 - [ ] Extract ingestion UI out of `app/page.tsx` into `features/ingestion/components/` — the feature has `services/` and `store/` but no `components/`, unlike every other feature module (chat, commits, repo-metadata).
 - [ ] Add a repo management view (delete / re-ingest) to pair with the backend DELETE endpoint above.
