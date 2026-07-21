@@ -5,9 +5,9 @@ Punch list from a frontend + backend audit on 2026-07-21. Nothing here has been 
 ## Backend
 
 - [x] Add `requirements.txt` / `pyproject.toml` (+ lockfile) — no dependency manifest exists at the repo root, so the backend isn't reproducibly installable.
-- [ ] Add a DELETE endpoint for repositories (e.g. `DELETE /repositories/{repository}`) — no way to remove an ingested repo/collection from Chroma once added.
+- [x] Add a DELETE endpoint for repositories (e.g. `DELETE /repositories/{repository}`) — no way to remove an ingested repo/collection from Chroma once added.
 - [ ] Add auth/authz — currently any client can trigger ingestion or query any repository, no access control.
-- [ ] Stream `/query` responses (SSE or websocket) instead of a single blocking JSON response — frontend already has a `TypingIndicator` component implying streaming was intended but backend doesn't support it.
+- [x] Stream `/query` responses (SSE or websocket) instead of a single blocking JSON response — frontend already has a `TypingIndicator` component implying streaming was intended but backend doesn't support it. Backend-only so far: `WS /api/v1/ws/query` streams `retrieval` → `token`(s) → `done`/`error` events. Frontend chat still calls the blocking `POST /query`; wiring the chat UI to the websocket is separate follow-up work.
 - [ ] Add rate-limiting on ingestion/query endpoints — `MAX_TOKENS_PER_BATCH` config exists for Gemini calls but there's no request-level throttling.
 - [ ] Clean up `.temp_clones/` stale directories left over from prior ingestion runs (repo hygiene, not code, but worth automating cleanup on failure/completion).
 

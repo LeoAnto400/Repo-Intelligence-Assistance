@@ -223,5 +223,47 @@ class TestGeminiService(unittest.TestCase):
         with self.assertRaises(ValueError):
             service.generate_content("")
 
+
+class TestGeminiServiceStreaming(unittest.IsolatedAsyncioTestCase):
+    @patch("google.generativeai.configure")
+    async def test_generate_content_stream_yields_chunks_in_order(self, mock_configure):
+        service = GeminiService(api_key="key")
+
+        def make_chunk(text):
+            chunk = MagicMock()
+            chunk.text = text
+            return chunk
+
+        mock_model = MagicMock()
+        mock_model.generate_content.return_value = [
+            make_chunk("Hello"), make_chunk(" "), make_chunk("world"),
+        ]
+        service._client.GenerativeModel = MagicMock(return_value=mock_model)
+
+        chunks = [chunk async for chunk in service.generate_content_stream("tell me a story")]
+
+        self.assertEqual(chunks, ["Hello", " ", "world"])
+        mock_model.generate_content.assert_called_once_with("tell me a story", stream=True)
+
+    @patch("google.generativeai.configure")
+    async def test_generate_content_stream_validation_error(self, mock_configure):
+        service = GeminiService(api_key="key")
+        with self.assertRaises(ValueError):
+            async for _ in service.generate_content_stream(""):
+                pass
+
+    @patch("google.generativeai.configure")
+    async def test_generate_content_stream_propagates_errors(self, mock_configure):
+        service = GeminiService(api_key="key")
+
+        mock_model = MagicMock()
+        mock_model.generate_content.side_effect = RuntimeError("model unavailable")
+        service._client.GenerativeModel = MagicMock(return_value=mock_model)
+
+        with self.assertRaises(RuntimeError):
+            async for _ in service.generate_content_stream("tell me a story"):
+                pass
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6,7 +6,7 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from starlette.concurrency import run_in_threadpool
 
 from src.agents.analysis import AnalysisAgent
@@ -14,6 +14,7 @@ from src.agents.orchestrator import Orchestrator
 from src.agents.retrieval import RetrievalAgent
 from src.api.schemas import (
     CommitSummaryResponse,
+    DeleteRepositoryResponse,
     IngestRequest,
     IngestResponse,
     QueryRequest,
@@ -94,7 +95,7 @@ def validate_repo_url(repo_url: str) -> None:
         )
 
 
-def set_active_repository(repository: str) -> None:
+def set_active_repository(repository: Optional[str]) -> None:
     global _active_repository
     _active_repository = repository
 
@@ -103,7 +104,7 @@ def get_active_repository() -> Optional[str]:
     return _active_repository
 
 
-def set_active_repository_context(context: Dict[str, Any]) -> None:
+def set_active_repository_context(context: Optional[Dict[str, Any]]) -> None:
     global _active_repository_context
     _active_repository_context = context
 
@@ -366,6 +367,44 @@ async def list_repositories(
     ]
 
 
+@router.delete("/repositories/{repository}", response_model=DeleteRepositoryResponse)
+async def delete_repository(
+    repository: str,
+    vector_store: VectorStoreManager = Depends(get_vector_store),
+) -> DeleteRepositoryResponse:
+    """Deletes a previously ingested repository's vector collection. If the
+    deleted repository was the active one, clears the active selection too
+    so /query and /repository correctly report that nothing is active."""
+    delete_id = uuid.uuid4().hex[:8]
+    log = _TaggedLogAdapter(logger, {"tag": f"delete:{delete_id}"})
+
+    collections = await run_in_threadpool(vector_store.list_collections)
+    match = next((item for item in collections if item["name"] == repository), None)
+    if match is None:
+        log.error("Repository not found for deletion: %s", repository)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Repository '{repository}' has not been ingested.",
+        )
+
+    try:
+        await run_in_threadpool(vector_store.reset_collection, repository)
+    except Exception as e:
+        log.exception("Failed to delete repository: %s", repository)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete repository: {e}",
+        ) from e
+
+    if get_active_repository() == repository:
+        set_active_repository(None)
+        set_active_repository_context(None)
+        log.info("Cleared active repository after deletion: %s", repository)
+
+    log.info("Repository deleted: %s", repository)
+    return DeleteRepositoryResponse(repository=repository, status="deleted")
+
+
 @router.post("/repositories/{repository}/select", response_model=RepositoryContextResponse)
 async def select_repository(
     repository: str,
@@ -520,3 +559,49 @@ async def query_repository(
         source_files=result.source_files,
         retrieved_chunks=result.retrieved_chunks,
     )
+
+
+@router.websocket("/ws/query")
+async def query_repository_ws(
+    websocket: WebSocket,
+    orchestrator: Orchestrator = Depends(get_orchestrator),
+) -> None:
+    """
+    Streaming counterpart to POST /query. Accepts a persistent connection and,
+    for each ``{"question": "..."}`` message received, streams back:
+      - one ``{"type": "retrieval", "retrieved_chunks": N}`` event,
+      - a series of ``{"type": "token", "text": "..."}`` events as the answer
+        is generated,
+      - a final ``{"type": "done", "answer": ..., "source_files": ...,
+        "chunk_count": ...}`` event,
+    or a ``{"type": "error", "detail": "..."}`` event on failure. The
+    connection stays open across multiple questions until the client
+    disconnects.
+    """
+    await websocket.accept()
+    try:
+        while True:
+            payload = await websocket.receive_json()
+            question = (payload.get("question") or "").strip() if isinstance(payload, dict) else ""
+
+            if not question:
+                await websocket.send_json({"type": "error", "detail": "Question cannot be empty."})
+                continue
+
+            query_id = uuid.uuid4().hex[:8]
+            log = _TaggedLogAdapter(logger, {"tag": f"query-ws:{query_id}"})
+            request_start = time.perf_counter()
+            log.info("Query start: question=%r", question)
+
+            try:
+                async for event in orchestrator.stream(question):
+                    await websocket.send_json(event)
+                log.info("Query complete: total_time=%.2fs", time.perf_counter() - request_start)
+            except (ValueError, RuntimeError) as e:
+                log.exception("Query streaming failed")
+                await websocket.send_json({"type": "error", "detail": str(e)})
+            except Exception as e:
+                log.exception("Unexpected query streaming failure")
+                await websocket.send_json({"type": "error", "detail": f"Query failed: {e}"})
+    except WebSocketDisconnect:
+        logger.info("Query websocket disconnected")

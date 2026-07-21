@@ -1,10 +1,12 @@
+import asyncio
 import logging
 import os
 import random
+import threading
 import time
 import inspect
 from collections import deque
-from typing import List, Optional, Any
+from typing import AsyncIterator, List, Optional, Any
 
 try:
     from google.api_core import exceptions as google_exceptions
@@ -612,3 +614,65 @@ class GeminiService:
         except Exception as e:
             logger.exception("Failed to generate content: %s", e)
             raise RuntimeError(f"Failed to generate content: {e}") from e
+
+    async def generate_content_stream(
+        self,
+        prompt: str,
+        system_instruction: Optional[str] = None,
+        model: str = "gemini-2.5-flash",
+    ) -> AsyncIterator[str]:
+        """
+        Stream generated content chunk-by-chunk as the model produces it,
+        instead of waiting for the full response.
+
+        The underlying genai SDK only exposes a synchronous streaming
+        iterator, so this runs it on a background thread and forwards each
+        chunk to the asyncio event loop through a queue.
+
+        Args:
+            prompt: Main user-facing query prompt.
+            system_instruction: Guidelines/instructions to set model role/behavior.
+            model: Target Gemini LLM model name.
+
+        Yields:
+            Successive text chunks of the generated response.
+
+        Raises:
+            ValueError: If prompt is empty.
+            RuntimeError: If the streaming LLM call fails.
+        """
+        if not prompt or not prompt.strip():
+            logger.error("Prompt cannot be empty.")
+            raise ValueError("Prompt cannot be empty.")
+
+        loop = asyncio.get_event_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        done = object()
+
+        def _produce() -> None:
+            try:
+                generative_model = self._client.GenerativeModel(
+                    model_name=model,
+                    system_instruction=system_instruction,
+                )
+                response = generative_model.generate_content(prompt, stream=True)
+                for chunk in response:
+                    text = getattr(chunk, "text", "") or ""
+                    if text:
+                        loop.call_soon_threadsafe(queue.put_nowait, text)
+            except Exception as e:
+                loop.call_soon_threadsafe(queue.put_nowait, e)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, done)
+
+        logger.info("Streaming content with model %s", model)
+        threading.Thread(target=_produce, daemon=True).start()
+
+        while True:
+            item = await queue.get()
+            if item is done:
+                return
+            if isinstance(item, Exception):
+                logger.exception("Failed to stream content: %s", item)
+                raise RuntimeError(f"Failed to stream content: {item}") from item
+            yield item

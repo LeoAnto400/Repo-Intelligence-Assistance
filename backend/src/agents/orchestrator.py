@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, AsyncIterator, Dict, List, Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
@@ -96,6 +96,35 @@ class Orchestrator(BaseAgent):
             source_files=analysis_response.get("source_files", []),
             retrieved_chunks=len(retrieval_results),
         )
+
+    async def stream(self, question: str) -> AsyncIterator[Dict[str, Any]]:
+        """
+        Streaming counterpart to :meth:`process`. Runs retrieval up front
+        (it has no incremental output), then streams the analysis answer
+        token-by-token. Bypasses the compiled LangGraph workflow, since its
+        nodes only return complete state rather than incremental output.
+
+        Yields a ``retrieval`` event with the retrieved chunk count, followed
+        by the ``token``/``done`` events produced by
+        ``AnalysisAgent.stream_analysis``.
+        """
+        if not question or not isinstance(question, str) or not question.strip():
+            logger.error("Orchestrator received an empty or invalid question.")
+            raise ValueError("Question cannot be empty.")
+
+        normalized_question = question.strip()
+
+        retrieval_response = await self.retrieval_agent.process({"query": normalized_question})
+        retrieval_error = retrieval_response.get("error")
+        if retrieval_error:
+            logger.error("Retrieval failed during streaming orchestration: %s", retrieval_error)
+            raise RuntimeError(f"Retrieval failed: {retrieval_error}")
+
+        retrieval_results = retrieval_response.get("results") or []
+        yield {"type": "retrieval", "retrieved_chunks": len(retrieval_results)}
+
+        async for event in self.analysis_agent.stream_analysis(normalized_question, retrieval_results):
+            yield event
 
     async def retrieval_node(self, state: AgentState) -> Dict[str, Any]:
         question = state.get("question", "")

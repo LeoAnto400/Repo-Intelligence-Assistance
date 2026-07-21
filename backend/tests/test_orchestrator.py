@@ -266,6 +266,53 @@ class TestOrchestrator(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Analysis agent failed", str(context.exception))
         self.assertIn("Gemini down", self.orchestrator.last_state["error"])
 
+    async def test_stream_yields_retrieval_event_then_analysis_events(self):
+        retrieval_results = [{"chunk_id": "chunk-1", "content": "code"}]
+        self.retrieval_agent.process.return_value = {
+            "results": retrieval_results,
+            "error": None,
+        }
+
+        async def fake_stream_analysis(question, results):
+            self.assertEqual(question, "Where is login?")
+            self.assertEqual(results, retrieval_results)
+            yield {"type": "token", "text": "Login "}
+            yield {"type": "token", "text": "is in auth.py."}
+            yield {
+                "type": "done",
+                "answer": "Login is in auth.py.",
+                "source_files": ["src/auth.py"],
+                "chunk_count": 1,
+            }
+
+        self.analysis_agent.stream_analysis = fake_stream_analysis
+
+        events = [event async for event in self.orchestrator.stream("Where is login?")]
+
+        self.assertEqual(events[0], {"type": "retrieval", "retrieved_chunks": 1})
+        self.assertEqual(events[1], {"type": "token", "text": "Login "})
+        self.assertEqual(events[2], {"type": "token", "text": "is in auth.py."})
+        self.assertEqual(events[3]["answer"], "Login is in auth.py.")
+        self.retrieval_agent.process.assert_awaited_once_with({"query": "Where is login?"})
+
+    async def test_stream_rejects_empty_question(self):
+        with self.assertRaises(ValueError):
+            async for _ in self.orchestrator.stream("   "):
+                pass
+        self.retrieval_agent.process.assert_not_awaited()
+
+    async def test_stream_raises_when_retrieval_returns_error(self):
+        self.retrieval_agent.process.return_value = {
+            "results": [],
+            "error": "Required field 'repository_id' is missing or empty.",
+        }
+
+        with self.assertRaises(RuntimeError) as context:
+            async for _ in self.orchestrator.stream("Where is login?"):
+                pass
+
+        self.assertIn("Retrieval failed", str(context.exception))
+
     def test_agent_state_typing_exports_expected_keys(self):
         state: AgentState = {
             "question": "What does this do?",

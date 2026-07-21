@@ -204,6 +204,101 @@ class TestApi(unittest.TestCase):
         self.assertEqual(response.status_code, 500)
         self.assertIn("Retrieval failed", response.json()["detail"])
 
+    def test_delete_repository_endpoint_removes_collection(self):
+        vector_store = MagicMock()
+        vector_store.list_collections.return_value = [
+            {"name": "demo", "repo_url": "https://github.com/example/demo", "chunk_count": 5}
+        ]
+        app.dependency_overrides[routes.get_vector_store] = lambda: vector_store
+        routes._active_repository = "demo"
+        routes._active_repository_context = {"repository": "demo"}
+
+        response = self.client.delete("/api/v1/repositories/demo")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"repository": "demo", "status": "deleted"})
+        vector_store.reset_collection.assert_called_once_with("demo")
+        self.assertIsNone(routes.get_active_repository())
+        self.assertIsNone(routes.get_active_repository_context())
+
+    def test_delete_repository_endpoint_requires_existing_repository(self):
+        vector_store = MagicMock()
+        vector_store.list_collections.return_value = []
+        app.dependency_overrides[routes.get_vector_store] = lambda: vector_store
+
+        response = self.client.delete("/api/v1/repositories/missing")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("has not been ingested", response.json()["detail"])
+        vector_store.reset_collection.assert_not_called()
+
+    def test_delete_repository_endpoint_leaves_other_active_repository_untouched(self):
+        vector_store = MagicMock()
+        vector_store.list_collections.return_value = [
+            {"name": "demo", "repo_url": "https://github.com/example/demo", "chunk_count": 5}
+        ]
+        app.dependency_overrides[routes.get_vector_store] = lambda: vector_store
+        routes._active_repository = "other-repo"
+        routes._active_repository_context = {"repository": "other-repo"}
+
+        response = self.client.delete("/api/v1/repositories/demo")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(routes.get_active_repository(), "other-repo")
+        self.assertEqual(routes.get_active_repository_context(), {"repository": "other-repo"})
+
+    def test_query_websocket_streams_events(self):
+        class FakeOrchestrator:
+            async def stream(self, question):
+                yield {"type": "retrieval", "retrieved_chunks": 1}
+                yield {"type": "token", "text": "Auth "}
+                yield {"type": "token", "text": "uses login."}
+                yield {
+                    "type": "done",
+                    "answer": "Auth uses login.",
+                    "source_files": ["src/auth.py"],
+                    "chunk_count": 1,
+                }
+
+        app.dependency_overrides[routes.get_orchestrator] = lambda: FakeOrchestrator()
+
+        with self.client.websocket_connect("/api/v1/ws/query") as websocket:
+            websocket.send_json({"question": "How does auth work?"})
+            events = [websocket.receive_json() for _ in range(4)]
+
+        self.assertEqual(events[0], {"type": "retrieval", "retrieved_chunks": 1})
+        self.assertEqual(events[1], {"type": "token", "text": "Auth "})
+        self.assertEqual(events[2], {"type": "token", "text": "uses login."})
+        self.assertEqual(events[3], {
+            "type": "done",
+            "answer": "Auth uses login.",
+            "source_files": ["src/auth.py"],
+            "chunk_count": 1,
+        })
+
+    def test_query_websocket_rejects_empty_question(self):
+        app.dependency_overrides[routes.get_orchestrator] = lambda: MagicMock()
+
+        with self.client.websocket_connect("/api/v1/ws/query") as websocket:
+            websocket.send_json({"question": "   "})
+            event = websocket.receive_json()
+
+        self.assertEqual(event, {"type": "error", "detail": "Question cannot be empty."})
+
+    def test_query_websocket_reports_orchestrator_failure(self):
+        class FailingOrchestrator:
+            async def stream(self, question):
+                raise RuntimeError("Retrieval failed")
+                yield  # pragma: no cover - makes this an async generator
+
+        app.dependency_overrides[routes.get_orchestrator] = lambda: FailingOrchestrator()
+
+        with self.client.websocket_connect("/api/v1/ws/query") as websocket:
+            websocket.send_json({"question": "How does auth work?"})
+            event = websocket.receive_json()
+
+        self.assertEqual(event, {"type": "error", "detail": "Retrieval failed"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,7 @@
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, AsyncIterator, Dict, List
 
 from src.agents.base import BaseAgent
 from src.agents.retrieval import RetrievalResult
@@ -132,6 +132,39 @@ class AnalysisAgent(BaseAgent):
             source_files=source_files,
             chunk_count=len(retrieval_results)
         )
+
+    async def stream_analysis(
+        self,
+        question: str,
+        retrieval_results: List[Any],
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """
+        Streaming counterpart to :meth:`process`. Yields ``{"type": "token",
+        "text": ...}`` events as the answer is generated, followed by a final
+        ``{"type": "done", "answer": ..., "source_files": ..., "chunk_count":
+        ...}`` event carrying the same payload shape ``process()`` returns.
+        """
+        normalized = self._normalize_retrieval_results(retrieval_results)
+        context = self._build_context_block(normalized)
+        prompt = self._build_prompt(question, context)
+        source_files = self._source_files(normalized)
+
+        chunks: List[str] = []
+        async for text in self.gemini_service.generate_content_stream(prompt):
+            chunks.append(text)
+            yield {"type": "token", "text": text}
+
+        logger.info(
+            "Streaming analysis complete. chunk_count=%d, source_file_count=%d",
+            len(normalized),
+            len(source_files),
+        )
+        yield {
+            "type": "done",
+            "answer": "".join(chunks),
+            "source_files": source_files,
+            "chunk_count": len(normalized),
+        }
 
     def _normalize_retrieval_results(self, raw_results: List[Any]) -> List[RetrievalResult]:
         retrieval_results: List[RetrievalResult] = []

@@ -171,6 +171,54 @@ class TestAnalysisAgent(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["chunk_count"], 0)
         self.assertIn("Analysis failed", response["error"])
 
+    async def test_stream_analysis_yields_tokens_then_done_event(self):
+        async def fake_stream(prompt):
+            yield "Auth "
+            yield "uses login."
+
+        self.mock_gemini_service.generate_content_stream = fake_stream
+
+        retrieval_results = [
+            RetrievalResult(
+                chunk_id="chunk-1",
+                file_path="src/auth.py",
+                content="def authenticate(token):\n    return validate(token)",
+                score=0.1,
+                metadata={"chunk_type": "function", "name": "authenticate"},
+            )
+        ]
+
+        events = [
+            event
+            async for event in self.agent.stream_analysis("How does auth work?", retrieval_results)
+        ]
+
+        self.assertEqual(events[0], {"type": "token", "text": "Auth "})
+        self.assertEqual(events[1], {"type": "token", "text": "uses login."})
+        self.assertEqual(events[2], {
+            "type": "done",
+            "answer": "Auth uses login.",
+            "source_files": ["src/auth.py"],
+            "chunk_count": 1,
+        })
+
+    async def test_stream_analysis_accepts_retrieval_result_dicts(self):
+        async def fake_stream(prompt):
+            yield "It prints hello."
+
+        self.mock_gemini_service.generate_content_stream = fake_stream
+
+        events = [
+            event
+            async for event in self.agent.stream_analysis(
+                "What does this do?",
+                [{"id": "chunk-1", "document": "print('hello')", "metadata": {"path": "src/main.py"}}],
+            )
+        ]
+
+        self.assertEqual(events[-1]["answer"], "It prints hello.")
+        self.assertEqual(events[-1]["source_files"], ["src/main.py"])
+
 
 if __name__ == "__main__":
     unittest.main()

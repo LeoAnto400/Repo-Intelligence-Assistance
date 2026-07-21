@@ -24,6 +24,11 @@ class QueryResponse(BaseModel):
     source_files: List[str]
     retrieved_chunks: int
 
+class DeleteRepositoryResponse(BaseModel):
+    """Response returned after a repository's vector collection is deleted."""
+    repository: str
+    status: str
+
 class RepositorySummary(BaseModel):
     """Summary of a repository already indexed in the vector store, for the repo picker."""
     repository: str
