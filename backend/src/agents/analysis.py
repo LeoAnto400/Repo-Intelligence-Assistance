@@ -1,3 +1,4 @@
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List
@@ -216,3 +217,117 @@ class AnalysisAgent(BaseAgent):
                 source_files.append(result.file_path)
 
         return source_files
+
+    async def generate_repository_overview(
+        self, repository: str, chunk_samples: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Generate a short AI summary, detected technologies, and suggested
+        questions for a repository from a sample of its already-ingested
+        chunks. Works from vector-store content alone, so it applies equally
+        to repositories re-activated without their original GitHub URL.
+        """
+        prompt = self._build_overview_prompt(repository, chunk_samples)
+        try:
+            raw = self.gemini_service.generate_content(prompt)
+        except Exception:
+            logger.exception("Failed to generate repository overview for %s", repository)
+            return {"summary": None, "technologies": [], "suggested_questions": []}
+        return self._parse_overview_response(raw)
+
+    def _build_overview_prompt(self, repository: str, chunk_samples: List[Dict[str, Any]]) -> str:
+        seen_files = set()
+        file_blocks: List[str] = []
+        for chunk in chunk_samples:
+            metadata = chunk.get("metadata") or {}
+            file_path = metadata.get("file_path") or "unknown"
+            if file_path in seen_files:
+                continue
+            seen_files.add(file_path)
+            content = (chunk.get("document") or "")[:800]
+            file_blocks.append(f"--- {file_path} ---\n{content}")
+            if len(file_blocks) >= 12:
+                break
+
+        context = "\n\n".join(file_blocks) if file_blocks else "No source content is available."
+
+        return (
+            "You are a senior software engineer producing a short repository overview "
+            "for a codebase search tool. Base your answer ONLY on the code samples below; "
+            "do not invent details the samples do not support.\n\n"
+            f"Repository: {repository}\n\n"
+            "Code samples:\n"
+            f"{context}\n\n"
+            "Respond with ONLY a valid JSON object (no markdown fences, no commentary) "
+            "matching this exact shape:\n"
+            "{\n"
+            '  "summary": "2-4 sentence plain-English description of what this project does",\n'
+            '  "technologies": ["short list of languages/frameworks/libraries actually used"],\n'
+            '  "suggested_questions": ["4 short questions a developer could ask a chat '
+            'assistant about this codebase"]\n'
+            "}"
+        )
+
+    def _parse_overview_response(self, raw: str) -> Dict[str, Any]:
+        fallback: Dict[str, Any] = {"summary": None, "technologies": [], "suggested_questions": []}
+        if not raw:
+            return fallback
+
+        text = raw.strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end == -1 or end < start:
+            return fallback
+
+        try:
+            data = json.loads(text[start:end + 1])
+        except (json.JSONDecodeError, ValueError):
+            return fallback
+        if not isinstance(data, dict):
+            return fallback
+
+        summary = data.get("summary")
+        technologies = data.get("technologies")
+        suggested_questions = data.get("suggested_questions")
+
+        return {
+            "summary": summary if isinstance(summary, str) and summary.strip() else None,
+            "technologies": (
+                [t for t in technologies if isinstance(t, str) and t.strip()]
+                if isinstance(technologies, list) else []
+            ),
+            "suggested_questions": (
+                [q for q in suggested_questions if isinstance(q, str) and q.strip()]
+                if isinstance(suggested_questions, list) else []
+            ),
+        }
+
+    async def generate_commit_summary(self, commit: Dict[str, Any]) -> str:
+        """
+        Generate a short plain-English summary of a single commit from its
+        message and diff (already captured during repository ingestion, so
+        this needs no additional GitHub calls).
+        """
+        prompt = self._build_commit_summary_prompt(commit)
+        raw = self.gemini_service.generate_content(prompt)
+        return raw.strip()
+
+    def _build_commit_summary_prompt(self, commit: Dict[str, Any]) -> str:
+        message = commit.get("message") or "(no commit message)"
+        author = commit.get("author") or "unknown"
+        additions = commit.get("additions") or 0
+        deletions = commit.get("deletions") or 0
+        files_changed = commit.get("filesChanged") or 0
+        diff = (commit.get("diff") or "").strip()
+        diff_block = diff if diff else "No diff content is available for this commit."
+
+        return (
+            "You are a senior software engineer summarizing a git commit for a teammate.\n\n"
+            f"Author: {author}\n"
+            f"Commit message: {message}\n"
+            f"Files changed: {files_changed} (+{additions}/-{deletions})\n\n"
+            "Diff (may be limited to a subset of the changed files):\n"
+            f"{diff_block}\n\n"
+            "Write a concise 2-4 sentence plain-English summary of what this commit actually "
+            "changes and why, based only on the message and diff above. If the diff is empty, "
+            "summarize from the commit message alone and say that no diff was available."
+        )

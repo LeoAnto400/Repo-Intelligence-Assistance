@@ -13,6 +13,7 @@ from src.agents.analysis import AnalysisAgent
 from src.agents.orchestrator import Orchestrator
 from src.agents.retrieval import RetrievalAgent
 from src.api.schemas import (
+    CommitSummaryResponse,
     IngestRequest,
     IngestResponse,
     QueryRequest,
@@ -180,6 +181,7 @@ async def ingest_repository(
     chunker: CodeChunker = Depends(get_chunker),
     gemini_service: GeminiService = Depends(get_gemini_service),
     vector_store: VectorStoreManager = Depends(get_vector_store),
+    analysis_agent: AnalysisAgent = Depends(get_analysis_agent),
 ) -> IngestResponse:
     ingestion_id = uuid.uuid4().hex[:8]
     log = _TaggedLogAdapter(logger, {"tag": f"ingest:{ingestion_id}"})
@@ -289,6 +291,22 @@ async def ingest_repository(
         ) from e
     log.info("Repository metadata fetch complete in %.2fs", time.perf_counter() - step_start)
 
+    # ── Step 5.5: Generate an AI summary, detected technologies, and
+    # suggested questions from the freshly ingested chunks ────────────────
+    step_start = time.perf_counter()
+    try:
+        samples = await run_in_threadpool(vector_store.sample_documents, repository, 20)
+        overview = await analysis_agent.generate_repository_overview(repository, samples)
+        repository_context["metadata"] = {
+            **repository_context.get("metadata", {}),
+            "ai_summary": overview.get("summary"),
+            "detected_technologies": overview.get("technologies", []),
+            "suggested_questions": overview.get("suggested_questions", []),
+        }
+    except Exception as e:
+        log.warning("Repository overview generation failed, continuing without it: %s", e)
+    log.info("Repository overview generation complete in %.2fs", time.perf_counter() - step_start)
+
     # ── Step 6: Activate the ingested repository for /query and /repository ──
     try:
         set_active_repository(repository)
@@ -353,11 +371,15 @@ async def select_repository(
     repository: str,
     vector_store: VectorStoreManager = Depends(get_vector_store),
     github_service: GitHubService = Depends(get_github_service),
+    analysis_agent: AnalysisAgent = Depends(get_analysis_agent),
 ) -> RepositoryContextResponse:
     """Activates a previously ingested repository for /query without re-cloning
     or re-embedding it. Repository metadata (stars, commits, PRs) is refreshed
     live from GitHub when the repo's URL was recorded at ingestion time; the
-    repository is still activated for chat even if that refresh fails."""
+    AI summary/technologies/suggested questions are regenerated from the
+    already-ingested chunks either way, so this works even for repositories
+    activated without a known GitHub URL. The repository is still activated
+    for chat even if either refresh fails."""
     select_id = uuid.uuid4().hex[:8]
     log = _TaggedLogAdapter(logger, {"tag": f"select:{select_id}"})
 
@@ -391,11 +413,62 @@ async def select_repository(
                 "Metadata refresh failed for %s, activating with minimal context: %s", repo_url, e
             )
 
+    try:
+        samples = await run_in_threadpool(vector_store.sample_documents, repository, 20)
+        overview = await analysis_agent.generate_repository_overview(repository, samples)
+        context["metadata"] = {
+            **context.get("metadata", {}),
+            "ai_summary": overview.get("summary"),
+            "detected_technologies": overview.get("technologies", []),
+            "suggested_questions": overview.get("suggested_questions", []),
+        }
+    except Exception as e:
+        log.warning("Repository overview generation failed for %s: %s", repository, e)
+
     set_active_repository(repository)
     set_active_repository_context(context)
     log.info("Activated repository: %s", repository)
 
     return RepositoryContextResponse(**context)
+
+
+@router.post("/commits/{commit_hash}/summary", response_model=CommitSummaryResponse)
+async def summarize_commit(
+    commit_hash: str,
+    analysis_agent: AnalysisAgent = Depends(get_analysis_agent),
+) -> CommitSummaryResponse:
+    """Generates an AI summary of a single commit belonging to the active
+    repository, using the message/diff already captured at ingestion time."""
+    summary_id = uuid.uuid4().hex[:8]
+    log = _TaggedLogAdapter(logger, {"tag": f"commit-summary:{summary_id}"})
+
+    context = get_active_repository_context()
+    if not context:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No repository has been ingested yet.",
+        )
+
+    commits = context.get("commits") or []
+    commit = next((c for c in commits if c.get("hash") == commit_hash), None)
+    if commit is None:
+        log.error("Commit not found in active repository: %s", commit_hash)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Commit '{commit_hash}' was not found in the active repository's recent commits.",
+        )
+
+    try:
+        summary = await analysis_agent.generate_commit_summary(commit)
+    except Exception as e:
+        log.exception("Commit summary generation failed for %s", commit_hash)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to generate commit summary: {e}",
+        ) from e
+
+    log.info("Commit summary generated for %s", commit_hash)
+    return CommitSummaryResponse(hash=commit_hash, summary=summary)
 
 
 @router.post("/query", response_model=QueryResponse)

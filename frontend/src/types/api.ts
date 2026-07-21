@@ -21,11 +21,21 @@ export interface QueryResponse {
 }
 
 export interface CommitMetadata {
-  sha: string;
-  message: string;
+  hash: string;
   author: string;
-  date: string;
+  message: string;
+  time: string;
+  branch: string;
+  filesChanged: number;
+  additions: number;
+  deletions: number;
+  diff: string;
   [key: string]: unknown;
+}
+
+export interface CommitSummaryResponse {
+  hash: string;
+  summary: string;
 }
 
 export interface PullRequestMetadata {

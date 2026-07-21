@@ -98,7 +98,7 @@ export default function DashboardShell({ children }: DashboardShellProps) {
   const navItems: NavItem[] = [
     { name: 'Overview', icon: LayoutDashboard, href: '/' },
     { name: 'Chat', icon: MessageSquare, badge: 'AI', href: '/chat' },
-    { name: 'Commits', icon: GitCommit },
+    { name: 'Commits', icon: GitCommit, href: '/commits' },
     { name: 'Pull Requests', icon: GitPullRequest, badge: 2 },
     { name: 'Issues', icon: CircleAlert },
     { name: 'File Explorer', icon: FolderOpen },

@@ -30,6 +30,11 @@ class RepositorySummary(BaseModel):
     repo_url: Optional[str] = None
     chunk_count: int = 0
 
+class CommitSummaryResponse(BaseModel):
+    """AI-generated plain-English summary of a single commit."""
+    hash: str
+    summary: str
+
 class RepositoryContextResponse(BaseModel):
     """Repository metadata and source snapshot for the active ingested repository."""
     repository: str

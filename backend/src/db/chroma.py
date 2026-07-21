@@ -169,6 +169,26 @@ class VectorStoreManager:
         logger.debug("Query similarity returned %d results", len(mapped_results))
         return mapped_results
 
+    def sample_documents(self, collection_name: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """
+        Fetch an arbitrary sample of documents from a collection (no similarity
+        search, no query embedding needed) for repository-level summarization.
+        """
+        collection = self.get_collection(collection_name)
+        result = collection.get(limit=limit, include=["documents", "metadatas"])
+
+        ids = result.get("ids") or []
+        documents = result.get("documents") or []
+        metadatas = result.get("metadatas") or []
+
+        samples: List[Dict[str, Any]] = []
+        for idx in range(len(ids)):
+            samples.append({
+                "document": documents[idx] if idx < len(documents) else None,
+                "metadata": metadatas[idx] if idx < len(metadatas) else None,
+            })
+        return samples
+
     def reset_collection(self, collection_name: str) -> None:
         """
         Delete a collection by name if it exists, effectively resetting it.
