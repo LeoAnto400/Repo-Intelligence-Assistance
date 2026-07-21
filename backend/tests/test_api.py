@@ -21,12 +21,16 @@ class TestApi(unittest.TestCase):
         routes.get_orchestrator.cache_clear()
         routes._active_repository = None
         routes._active_repository_context = None
+        routes._ingest_rate_limiter.reset()
+        routes._query_rate_limiter.reset()
         self.client = TestClient(app)
 
     def tearDown(self):
         app.dependency_overrides.clear()
         routes._active_repository = None
         routes._active_repository_context = None
+        routes._ingest_rate_limiter.reset()
+        routes._query_rate_limiter.reset()
 
     def test_health_endpoint(self):
         response = self.client.get("/health")
@@ -298,6 +302,41 @@ class TestApi(unittest.TestCase):
             event = websocket.receive_json()
 
         self.assertEqual(event, {"type": "error", "detail": "Retrieval failed"})
+
+    def test_ingest_endpoint_enforces_rate_limit(self):
+        for _ in range(routes._ingest_rate_limiter.max_requests):
+            routes._ingest_rate_limiter.allow("testclient")
+
+        response = self.client.post(
+            "/api/v1/ingest",
+            json={"repo_url": "https://github.com/example/demo"},
+        )
+
+        self.assertEqual(response.status_code, 429)
+        self.assertIn("Too many ingestion requests", response.json()["detail"])
+
+    def test_query_endpoint_enforces_rate_limit(self):
+        for _ in range(routes._query_rate_limiter.max_requests):
+            routes._query_rate_limiter.allow("testclient")
+
+        response = self.client.post(
+            "/api/v1/query",
+            json={"question": "How does auth work?"},
+        )
+
+        self.assertEqual(response.status_code, 429)
+        self.assertIn("Too many query requests", response.json()["detail"])
+
+    def test_query_websocket_enforces_rate_limit(self):
+        app.dependency_overrides[routes.get_orchestrator] = lambda: MagicMock()
+        for _ in range(routes._query_rate_limiter.max_requests):
+            routes._query_rate_limiter.allow("testclient")
+
+        with self.client.websocket_connect("/api/v1/ws/query") as websocket:
+            websocket.send_json({"question": "How does auth work?"})
+            event = websocket.receive_json()
+
+        self.assertEqual(event, {"type": "error", "detail": routes._QUERY_RATE_LIMIT_MESSAGE})
 
 
 if __name__ == "__main__":

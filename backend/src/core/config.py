@@ -38,7 +38,12 @@ class Settings(BaseSettings):
     # Retrieval & Reranking
     RETRIEVAL_TOP_K: int = Field(20, description="Number of ANN candidates fetched from ChromaDB before reranking")
     RETRIEVAL_FINAL_K: int = Field(5, description="Number of reranked chunks passed to the LLM for answer generation")
-    
+
+    # Request-level rate limiting (per client IP). Separate from the Gemini
+    # API rate limiter above, which throttles outbound calls to Google.
+    INGEST_RATE_LIMIT_PER_MINUTE: int = Field(5, description="Maximum /ingest requests allowed per client IP per minute")
+    QUERY_RATE_LIMIT_PER_MINUTE: int = Field(20, description="Maximum /query requests (REST or websocket) allowed per client IP per minute")
+
     class Config:
         env_file = ".env"
         case_sensitive = True

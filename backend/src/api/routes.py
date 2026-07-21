@@ -6,7 +6,7 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from starlette.concurrency import run_in_threadpool
 
 from src.agents.analysis import AnalysisAgent
@@ -23,6 +23,7 @@ from src.api.schemas import (
     RepositorySummary,
 )
 from src.core.config import settings
+from src.core.rate_limit import InMemoryRateLimiter
 from src.db.chroma import VectorStoreManager
 from src.services.chunker import CodeChunker, CodeFile
 from src.services.gemini import GeminiService
@@ -34,6 +35,34 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 _active_repository: Optional[str] = None
 _active_repository_context: Optional[Dict[str, Any]] = None
+
+_ingest_rate_limiter = InMemoryRateLimiter(
+    max_requests=settings.INGEST_RATE_LIMIT_PER_MINUTE, window_seconds=60.0
+)
+_query_rate_limiter = InMemoryRateLimiter(
+    max_requests=settings.QUERY_RATE_LIMIT_PER_MINUTE, window_seconds=60.0
+)
+_QUERY_RATE_LIMIT_MESSAGE = "Too many query requests. Please slow down and try again shortly."
+
+
+def _client_key(client: Optional[Any]) -> str:
+    return client.host if client else "unknown"
+
+
+def enforce_ingest_rate_limit(request: Request) -> None:
+    if not _ingest_rate_limiter.allow(_client_key(request.client)):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many ingestion requests. Please wait a minute before trying again.",
+        )
+
+
+def enforce_query_rate_limit(request: Request) -> None:
+    if not _query_rate_limiter.allow(_client_key(request.client)):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=_QUERY_RATE_LIMIT_MESSAGE,
+        )
 
 
 class _TaggedLogAdapter(logging.LoggerAdapter):
@@ -183,6 +212,7 @@ async def ingest_repository(
     gemini_service: GeminiService = Depends(get_gemini_service),
     vector_store: VectorStoreManager = Depends(get_vector_store),
     analysis_agent: AnalysisAgent = Depends(get_analysis_agent),
+    _rate_limit: None = Depends(enforce_ingest_rate_limit),
 ) -> IngestResponse:
     ingestion_id = uuid.uuid4().hex[:8]
     log = _TaggedLogAdapter(logger, {"tag": f"ingest:{ingestion_id}"})
@@ -514,6 +544,7 @@ async def summarize_commit(
 async def query_repository(
     payload: QueryRequest,
     orchestrator: Orchestrator = Depends(get_orchestrator),
+    _rate_limit: None = Depends(enforce_query_rate_limit),
 ) -> QueryResponse:
     query_id = uuid.uuid4().hex[:8]
     log = _TaggedLogAdapter(logger, {"tag": f"query:{query_id}"})
@@ -586,6 +617,10 @@ async def query_repository_ws(
 
             if not question:
                 await websocket.send_json({"type": "error", "detail": "Question cannot be empty."})
+                continue
+
+            if not _query_rate_limiter.allow(_client_key(websocket.client)):
+                await websocket.send_json({"type": "error", "detail": _QUERY_RATE_LIMIT_MESSAGE})
                 continue
 
             query_id = uuid.uuid4().hex[:8]

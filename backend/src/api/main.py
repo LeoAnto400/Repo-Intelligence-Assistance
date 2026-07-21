@@ -1,4 +1,7 @@
 import logging
+import os
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,9 +10,40 @@ from fastapi.responses import JSONResponse
 from src.api.routes import router as api_router
 from src.core.config import settings
 from src.core.logging import configure_logging
+from src.services.github import safe_rmtree
 
 configure_logging()
 logger = logging.getLogger(__name__)
+
+
+def _clear_stale_temp_clones() -> None:
+    """
+    Wipe any leftover repository clone directories from .temp_clones/.
+
+    Each ingestion request cleans up its own clone directory as soon as it
+    finishes, success or failure, so anything still present at process
+    startup can only be debris from a previous process that was killed
+    mid-clone (e.g. a crash or a hard reload) - safe to remove unconditionally.
+    """
+    temp_clones_dir = os.path.join(os.getcwd(), ".temp_clones")
+    if not os.path.isdir(temp_clones_dir):
+        return
+
+    removed = 0
+    for entry in os.scandir(temp_clones_dir):
+        if entry.is_dir():
+            safe_rmtree(entry.path)
+            removed += 1
+
+    if removed:
+        logger.info("Cleared %d stale director%s from .temp_clones/ on startup", removed, "y" if removed == 1 else "ies")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    _clear_stale_temp_clones()
+    yield
+
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -17,6 +51,7 @@ app = FastAPI(
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 # Allow the frontend dev server to call the API directly from the browser
